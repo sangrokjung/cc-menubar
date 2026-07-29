@@ -111,10 +111,18 @@ else
 
     mkdir -p "${LAUNCH_AGENTS_DIR}"
 
-    # substitute the __INSTALL_DIR__ placeholder (BSD sed / macOS)
-    sed "s|__INSTALL_DIR__|${INSTALL_DIR}|g" "${PLIST_TEMPLATE}" > "${PLIST_DST}"
-
-    success "plist created: ${PLIST_DST}"
+    # Never clobber an existing plist: the template carries only PATH, so
+    # regenerating it silently drops locally-added EnvironmentVariables such as
+    # TEAMCLAUDE_LAUNCHD_LABEL — without which kickstartTeamClaudeServer() can
+    # never restart the proxy, and the failure is invisible (it just returns false).
+    if [[ -f "${PLIST_DST}" && "${FORCE_PLIST:-0}" != "1" ]]; then
+        warn "plist already exists — keeping it (local env vars preserved)"
+        warn "Regenerate from the template with: FORCE_PLIST=1 bash install.sh"
+    else
+        # substitute the __INSTALL_DIR__ placeholder (BSD sed / macOS)
+        sed "s|__INSTALL_DIR__|${INSTALL_DIR}|g" "${PLIST_TEMPLATE}" > "${PLIST_DST}"
+        success "plist created: ${PLIST_DST}"
+    fi
 
     # unload any existing daemon
     if launchctl list "${LABEL}" &>/dev/null; then

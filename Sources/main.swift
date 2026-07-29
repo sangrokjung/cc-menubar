@@ -2273,9 +2273,48 @@ func teamClaudeLaunchdLabel() -> String? {
     return label
 }
 
+/// The proxy port, resolved exactly the way `loadTeamClaudeHealth()` resolves it.
+func teamClaudeServerPort() -> Int {
+    let home = NSHomeDirectory()
+    let server = readTeamClaudeJSON("\(home)/.config/teamclaude.server.json")
+    let config = readTeamClaudeJSON("\(home)/.config/teamclaude.json")
+    return tcInt(server?["port"])
+        ?? tcInt(tcDict(config?["proxy"])?["port"])
+        ?? 3456
+}
+
+/// How many requests the proxy is streaming right now.
+/// `nil` means the server did not answer — it is already down, so restarting it
+/// cannot truncate anything.
+func teamClaudeInflightCount() -> Int? {
+    guard let status = fetchTeamClaudeStatus(port: teamClaudeServerPort()) else { return nil }
+    let accounts = tcArray(status["accounts"]) ?? []
+    return accounts.reduce(0) { $0 + (tcInt($1["inflight"]) ?? 0) }
+}
+
+/// Restart the proxy through launchd.
+///
+/// `launchctl kickstart -k` sends SIGKILL, and teamclaude cannot recover a response
+/// whose headers already went out: every failover branch in its upstream-error
+/// handler is gated on `!res.headersSent`, and the headers are committed before the
+/// first body byte is read. So killing the proxy mid-stream truncates every request
+/// in flight, and each affected Claude Code window prints
+/// "API Error: Connection closed mid-response. The response above may be incomplete."
+/// Measured 2026-07-29: six such restarts took out three unrelated sessions apiece,
+/// every burst inside a 22 ms window.
+///
+/// So: never kill while requests are in flight. Every automatic caller already
+/// treats `false` as "not restarted" and retries on its next refresh tick, and a
+/// drift/offline reading is never urgent enough to justify cutting live responses.
+/// `force` is reserved for a restart the user explicitly confirmed.
 @discardableResult
-func kickstartTeamClaudeServer() -> Bool {
+func kickstartTeamClaudeServer(force: Bool = false) -> Bool {
     guard let label = teamClaudeLaunchdLabel() else { return false }
+    if !force, let inflight = teamClaudeInflightCount(), inflight > 0 {
+        print("TEAMCLAUDE-RESTART-DEFERRED: 진행 중 요청 \(inflight)건 — 재시작 보류")
+        fflush(stdout)
+        return false
+    }
     let task = Process()
     task.executableURL = URL(fileURLWithPath: "/bin/launchctl")
     task.arguments = ["kickstart", "-k", "gui/\(getuid())/\(label)"]
@@ -2288,7 +2327,29 @@ func kickstartTeamClaudeServer() -> Bool {
     }
 }
 
+/// Refresh OAuth tokens by shelling out to `teamclaude accounts`.
+///
+/// This is DANGEROUS while the proxy is running. `accountsCommand()` rewrites the
+/// WHOLE config with a plain `saveConfig()` — no merge — and additionally removes
+/// entries in its accountUuid dedup pass. teamclaude's own comment on
+/// `atomicConfigUpdate` states that cross-PROCESS races are unhandled by design
+/// ("a CLI write while the server runs is reconciled on the next reload"), so
+/// running this against a live server is a last-writer-wins overwrite of the
+/// account list.
+///
+/// That is how the 4th account (dabu, priority 9 — the only overflow spill tier)
+/// vanished on 2026-07-29 09:20:55. Its absence produced accountConfigDrift, which
+/// in turn fired the SIGKILL restart documented on kickstartTeamClaudeServer().
+///
+/// When the server is up it already refreshes its own tokens (`ensureTokenFresh`
+/// plus the warm-up fan-out), so there is nothing here to do. Keep exactly one
+/// config writer: shell out only when the server is down.
 func refreshTeamClaudeOAuthAccounts() -> Int32? {
+    if fetchTeamClaudeStatus(port: teamClaudeServerPort()) != nil {
+        print("TEAMCLAUDE-OAUTH-REFRESH-SKIPPED: 서버 실행 중 — config 단일 writer 유지")
+        fflush(stdout)
+        return 0
+    }
     let process = Process()
     let executable = resolveTeamClaudeExecutable()
     if executable == "teamclaude" {
@@ -2513,6 +2574,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var lastTeamClaudeAutoSyncAt: Date?
     var pendingTeamClaudeForcedSyncReason: String?
     var teamClaudeOutageStartedAt: TimeInterval?
+    /// When account drift was first observed continuously, so a one-off drift
+    /// sample cannot restart the proxy out from under live requests.
+    var teamClaudeDriftStartedAt: TimeInterval?
     weak var openDashboardView: StatusMenuDashboardView?
     var cachedSparklineCosts: [Double] = []
     var cachedSparklineImage: NSImage?
@@ -2774,6 +2838,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let forcedSyncReason = pendingTeamClaudeForcedSyncReason
         pendingTeamClaudeForcedSyncReason = nil
         let previousOutageStartedAt = teamClaudeOutageStartedAt
+        let previousDriftStartedAt = teamClaudeDriftStartedAt
         let autoSyncAllowed = lastTeamClaudeAutoSyncAt.map { Date().timeIntervalSince($0) > 60 } ?? true
         DispatchQueue.global(qos: .utility).async { [weak self] in
             var teamClaude = loadTeamClaudeHealth()
@@ -2783,7 +2848,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 candidateReachable: teamClaude.serverReachable,
                 observedAt: observedAt
             )
+            var driftStartedAt = nextTeamClaudeDriftStartedAt(
+                previous: previousDriftStartedAt,
+                accountConfigDrift: teamClaude.accountConfigDrift,
+                observedAt: observedAt
+            )
             let outageDuration = outageStartedAt.map { max(0, observedAt - $0) } ?? 0
+            let driftDuration = driftStartedAt.map { max(0, observedAt - $0) } ?? 0
             var syncReason = forcedSyncReason
             if syncReason == nil,
                let recovery = teamClaudeRecoveryReason(
@@ -2795,13 +2866,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 case .serverOffline:
                     if teamClaudeShouldAutoRecover(
                         candidateReachable: false,
-                        accountConfigDrift: 0,
                         outageDurationSeconds: outageDuration
                     ) {
                         syncReason = "서버 연결 \(Int(outageDuration))초 실패"
                     }
                 case .accountDrift(let count):
-                    syncReason = "계정 연동 불일치 \(count)개"
+                    if teamClaudeShouldAutoRecoverDrift(driftDurationSeconds: driftDuration) {
+                        syncReason = "계정 연동 불일치 \(count)개 \(Int(driftDuration))초 지속"
+                    }
                 }
             }
 
@@ -2818,6 +2890,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                         teamClaude = loadTeamClaudeHealth()
                         if teamClaude.serverReachable && teamClaude.accountConfigDrift == 0 {
                             outageStartedAt = nil
+                            driftStartedAt = nil
                             syncSucceeded = true
                             break
                         }
@@ -2835,6 +2908,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     self.lastTeamClaudeAutoSyncAt = Date()
                 }
                 self.teamClaudeOutageStartedAt = teamClaude.serverReachable ? nil : outageStartedAt
+                self.teamClaudeDriftStartedAt = teamClaude.accountConfigDrift > 0 ? driftStartedAt : nil
                 self.commitTeamClaudeHealth(teamClaude, outageDuration: outageDuration)
                 let shouldRefreshAgain = self.teamClaudeRefreshCoordinator.finish()
                 self.refreshOpenDashboard()
@@ -3074,7 +3148,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let restartTeamClaudeItem = NSMenuItem(title: "TeamClaude 서버 재시작", action: #selector(restartTeamClaudeAction), keyEquivalent: "")
         restartTeamClaudeItem.target = self
-        let restartTeamClaudeView = MenuActionRowView(frame: NSRect(x: 0, y: 0, width: actionWidth, height: MenuActionRowView.preferredHeight), icon: "⟳", symbolName: "arrow.triangle.2.circlepath", title: "TeamClaude 서버 재시작", detail: "계정 반영", tone: blue)
+        let restartTeamClaudeView = MenuActionRowView(frame: NSRect(x: 0, y: 0, width: actionWidth, height: MenuActionRowView.preferredHeight), icon: "⟳", symbolName: "arrow.triangle.2.circlepath", title: "TeamClaude 서버 재시작", detail: "계정 반영 · 진행 중 응답 끊김", tone: blue)
         restartTeamClaudeView.onClick = { [weak self, weak menu] in
             self?.restartTeamClaudeAction()
             menu?.cancelTracking()
@@ -3313,7 +3387,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc func restartTeamClaudeAction() {
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            _ = kickstartTeamClaudeServer()
+            // Explicit user action: honour it even mid-stream. The menu row states
+            // the cost ("진행 중 응답 끊김"). Automatic callers must NOT pass force.
+            if let inflight = teamClaudeInflightCount(), inflight > 0 {
+                print("TEAMCLAUDE-RESTART-FORCED: 진행 중 요청 \(inflight)건 — 사용자 요청으로 강제 재시작")
+                fflush(stdout)
+            }
+            _ = kickstartTeamClaudeServer(force: true)
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
                 self?.refreshStatusOnly()
             }

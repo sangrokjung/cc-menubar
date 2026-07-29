@@ -184,15 +184,39 @@ func nextTeamClaudeOutageStartedAt(
     candidateReachable ? nil : (previous ?? observedAt)
 }
 
+func nextTeamClaudeDriftStartedAt(
+    previous: TimeInterval?,
+    accountConfigDrift: Int,
+    observedAt: TimeInterval
+) -> TimeInterval? {
+    accountConfigDrift > 0 ? (previous ?? observedAt) : nil
+}
+
 func teamClaudeShouldAutoRecover(
     candidateReachable: Bool,
-    accountConfigDrift: Int,
     outageDurationSeconds: TimeInterval,
     minimumOutageSeconds: TimeInterval = 60
 ) -> Bool {
-    if accountConfigDrift > 0 { return true }
     guard !candidateReachable else { return false }
     return outageDurationSeconds >= max(1, minimumOutageSeconds)
+}
+
+/// Account drift means the config file and the running server disagree about the
+/// account list. That is a display inconsistency, not an outage — the proxy keeps
+/// serving every request correctly with the accounts it already loaded. Reconciling
+/// it costs every in-flight response (see `kickstartTeamClaudeServer`), so require
+/// the drift to persist first. A transient reading — one taken while `teamclaude
+/// login` is mid-write, say — must never trigger a restart.
+///
+/// This used to short-circuit `teamClaudeShouldAutoRecover` with an unconditional
+/// `if accountConfigDrift > 0 { return true }`, so a single drift sample restarted
+/// the proxy immediately. On 2026-07-29 that cut three unrelated Claude Code
+/// sessions mid-response, twice.
+func teamClaudeShouldAutoRecoverDrift(
+    driftDurationSeconds: TimeInterval,
+    minimumDriftSeconds: TimeInterval = 120
+) -> Bool {
+    driftDurationSeconds >= max(1, minimumDriftSeconds)
 }
 
 enum TeamClaudeMeasurementIssue: Equatable {
