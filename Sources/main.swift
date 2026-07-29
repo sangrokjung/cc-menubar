@@ -2342,6 +2342,73 @@ func teamClaudeRestartSafety() -> TeamClaudeRestartSafety {
 enum TeamClaudeRestartGuard {
     static var deferrals = 0
     static let escalateEvery = 20
+    /// Consecutive restart ATTEMPTS that ran and still failed. Distinct from
+    /// `deferrals`, which counts restarts we chose not to attempt.
+    static var failures = 0
+}
+
+/// Run `launchctl` with the given arguments; returns its exit status, or nil if
+/// the process could not be spawned.
+@discardableResult
+func runLaunchctl(_ args: [String]) -> Int32? {
+    let task = Process()
+    task.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+    task.arguments = args
+    task.standardOutput = FileHandle.nullDevice
+    task.standardError = FileHandle.nullDevice
+    do {
+        try task.run()
+        task.waitUntilExit()
+        return task.terminationStatus
+    } catch {
+        return nil
+    }
+}
+
+/// Is the job present in the user's launchd domain at all?
+func teamClaudeJobRegistered(label: String) -> Bool {
+    runLaunchctl(["print", "gui/\(getuid())/\(label)"]) == 0
+}
+
+/// Conventional plist path for a user LaunchAgent label.
+func teamClaudePlistPath(label: String) -> String {
+    "\(NSHomeDirectory())/Library/LaunchAgents/\(label).plist"
+}
+
+/// Re-register a job that has left the launchd domain.
+///
+/// `kickstart` operates on a job that is already bootstrapped; against an
+/// unregistered label it can only fail. On 2026-07-29 the proxy's job was left
+/// unregistered by a bad `bootout`/`bootstrap` sequence, and this app then
+/// logged 64 consecutive `kicked=false` lines over ~30 minutes without ever
+/// trying the one call that could have fixed it. So: detect that state and
+/// bootstrap instead.
+func bootstrapTeamClaudeServer(label: String) -> Bool {
+    let plist = teamClaudePlistPath(label: label)
+    guard FileManager.default.fileExists(atPath: plist) else {
+        print("TEAMCLAUDE-BOOTSTRAP-FAILED: plist 없음 — \(plist)")
+        fflush(stdout)
+        return false
+    }
+    // bootout is asynchronous; a bootstrap issued into that gap fails with EBUSY.
+    if teamClaudeJobRegistered(label: label) {
+        runLaunchctl(["bootout", "gui/\(getuid())/\(label)"])
+        for _ in 0..<20 {
+            if !teamClaudeJobRegistered(label: label) { break }
+            Thread.sleep(forTimeInterval: 0.25)
+        }
+    }
+    for attempt in 1...3 {
+        if runLaunchctl(["bootstrap", "gui/\(getuid())", plist]) == 0 {
+            print("TEAMCLAUDE-BOOTSTRAP-OK: job 재등록됨 (시도 \(attempt))")
+            fflush(stdout)
+            return true
+        }
+        Thread.sleep(forTimeInterval: 1.0)
+    }
+    print("TEAMCLAUDE-BOOTSTRAP-FAILED: bootstrap 3회 실패 — \(plist)")
+    fflush(stdout)
+    return false
 }
 
 /// Restart the proxy through launchd.
@@ -2382,16 +2449,41 @@ func kickstartTeamClaudeServer(force: Bool = false) -> Bool {
         }
         TeamClaudeRestartGuard.deferrals = 0
     }
-    let task = Process()
-    task.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-    task.arguments = ["kickstart", "-k", "gui/\(getuid())/\(label)"]
-    do {
-        try task.run()
-        task.waitUntilExit()
-        return task.terminationStatus == 0
-    } catch {
-        return false
+    // A job that has left the launchd domain cannot be kickstarted — only
+    // bootstrapped. Ask first, and fall back to bootstrap when kickstart fails
+    // for that reason. Without this the app spins forever on a dead proxy:
+    // measured 2026-07-29, 64 consecutive `kicked=false` over ~30 minutes while
+    // every session got ConnectionRefused.
+    var ok: Bool
+    if teamClaudeJobRegistered(label: label) {
+        ok = runLaunchctl(["kickstart", "-k", "gui/\(getuid())/\(label)"]) == 0
+        if !ok {
+            print("TEAMCLAUDE-KICKSTART-FAILED: bootstrap 으로 승격 시도")
+            fflush(stdout)
+            ok = bootstrapTeamClaudeServer(label: label)
+        }
+    } else {
+        print("TEAMCLAUDE-JOB-UNREGISTERED: launchd 도메인에 job 없음 — bootstrap 으로 복구")
+        fflush(stdout)
+        ok = bootstrapTeamClaudeServer(label: label)
     }
+
+    if ok {
+        TeamClaudeRestartGuard.failures = 0
+    } else {
+        TeamClaudeRestartGuard.failures += 1
+        let n = TeamClaudeRestartGuard.failures
+        print("TEAMCLAUDE-RESTART-FAILED: 재시작 실패 (\(n)회 연속)")
+        // Silence is what let the 2026-07-29 outage run for 30 minutes: the app
+        // logged a bare `kicked=false` each cycle and nothing surfaced. Escalate
+        // early and keep escalating.
+        if n == 3 || n % 10 == 0 {
+            print("TEAMCLAUDE-RESTART-FAILED-REPEATEDLY: \(n)회 연속 실패 — 프록시가 내려간 채다. "
+                + "확인: launchctl print gui/\(getuid())/\(label) · 복구: tc-restart --reload")
+        }
+        fflush(stdout)
+    }
+    return ok
 }
 
 /// Refresh OAuth tokens by shelling out to `teamclaude accounts`.
