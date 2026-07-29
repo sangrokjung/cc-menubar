@@ -2283,13 +2283,65 @@ func teamClaudeServerPort() -> Int {
         ?? 3456
 }
 
-/// How many requests the proxy is streaming right now.
-/// `nil` means the server did not answer — it is already down, so restarting it
-/// cannot truncate anything.
+/// How many requests the proxy is streaming right now, or `nil` if the status
+/// endpoint did not answer. A `nil` is NOT proof that the proxy is gone — see
+/// `teamClaudeRestartSafety()`.
 func teamClaudeInflightCount() -> Int? {
     guard let status = fetchTeamClaudeStatus(port: teamClaudeServerPort()) else { return nil }
     let accounts = tcArray(status["accounts"]) ?? []
     return accounts.reduce(0) { $0 + (tcInt($1["inflight"]) ?? 0) }
+}
+
+/// PID the running proxy recorded in its state file.
+func teamClaudeServerPid() -> pid_t? {
+    let home = NSHomeDirectory()
+    guard let state = readTeamClaudeJSON("\(home)/.config/teamclaude.server.json"),
+          let pid = tcInt(state["pid"]), pid > 0 else { return nil }
+    return pid_t(pid)
+}
+
+/// Is the recorded proxy process actually alive? Load-independent, unlike an HTTP
+/// probe. EPERM means alive but owned by someone else, which still counts.
+func teamClaudeServerProcessAlive() -> Bool {
+    guard let pid = teamClaudeServerPid() else { return false }
+    if kill(pid, 0) == 0 { return true }
+    return errno == EPERM
+}
+
+enum TeamClaudeRestartSafety {
+    case idle          // proxy answered and is streaming nothing
+    case gone          // no live proxy process — nothing to truncate
+    case busy(Int)     // proxy answered and is streaming
+    case unknown       // process alive but not answering — must assume it is streaming
+}
+
+/// Decide whether the proxy can be restarted without truncating live responses.
+///
+/// The status endpoint is NOT a reliable liveness signal on this host: it carries a
+/// 2.5s timeout, and under the very load that makes responses long (observed at load
+/// 25 with swap exhausted) it times out while the proxy is serving perfectly well —
+/// the `TEAMCLAUDE-STALE: 서버 연결 실패` lines in cc-menubar.log are exactly that.
+/// Treating a failed probe as "server down, safe to kill" would fail open in the one
+/// situation this whole guard exists to prevent. So fall back to the recorded pid,
+/// and when the process is alive but silent, refuse to restart.
+func teamClaudeRestartSafety() -> TeamClaudeRestartSafety {
+    if let n = teamClaudeInflightCount() {
+        return n > 0 ? .busy(n) : .idle
+    }
+    return teamClaudeServerProcessAlive() ? .unknown : .gone
+}
+
+/// Consecutive automatic restarts refused. A proxy wedged with a leaked inflight
+/// counter would otherwise be protected forever and silently, so escalate the log
+/// line periodically instead of quietly deferring. We still never force — killing
+/// live responses is the failure being prevented.
+///
+/// Held as a static rather than a top-level `var`: globals in main.swift initialize
+/// in statement order, so a function reading one before its line has run would see
+/// uninitialized storage. Statics are initialized on first use.
+enum TeamClaudeRestartGuard {
+    static var deferrals = 0
+    static let escalateEvery = 20
 }
 
 /// Restart the proxy through launchd.
@@ -2310,10 +2362,25 @@ func teamClaudeInflightCount() -> Int? {
 @discardableResult
 func kickstartTeamClaudeServer(force: Bool = false) -> Bool {
     guard let label = teamClaudeLaunchdLabel() else { return false }
-    if !force, let inflight = teamClaudeInflightCount(), inflight > 0 {
-        print("TEAMCLAUDE-RESTART-DEFERRED: 진행 중 요청 \(inflight)건 — 재시작 보류")
-        fflush(stdout)
-        return false
+    if !force {
+        var reason: String?
+        switch teamClaudeRestartSafety() {
+        case .busy(let n): reason = "진행 중 요청 \(n)건"
+        case .unknown:     reason = "프로세스는 살아있으나 상태 응답 없음 (진행 중으로 간주)"
+        case .idle, .gone: reason = nil
+        }
+        if let reason {
+            TeamClaudeRestartGuard.deferrals += 1
+            let n = TeamClaudeRestartGuard.deferrals
+            print("TEAMCLAUDE-RESTART-DEFERRED: \(reason) — 재시작 보류 (\(n)회 연속)")
+            if n % TeamClaudeRestartGuard.escalateEvery == 0 {
+                print("TEAMCLAUDE-RESTART-BLOCKED-LONG: \(n)회 연속 보류 — "
+                    + "프록시가 멈춰 있다면 유휴 시점에 tc-restart 로 직접 재시작하십시오")
+            }
+            fflush(stdout)
+            return false
+        }
+        TeamClaudeRestartGuard.deferrals = 0
     }
     let task = Process()
     task.executableURL = URL(fileURLWithPath: "/bin/launchctl")
@@ -2345,7 +2412,11 @@ func kickstartTeamClaudeServer(force: Bool = false) -> Bool {
 /// plus the warm-up fan-out), so there is nothing here to do. Keep exactly one
 /// config writer: shell out only when the server is down.
 func refreshTeamClaudeOAuthAccounts() -> Int32? {
-    if fetchTeamClaudeStatus(port: teamClaudeServerPort()) != nil {
+    // Liveness must not hinge on the HTTP probe alone: it times out under load while
+    // the proxy is serving fine, and concluding "server down" here is what lets the
+    // config-clobbering command run against a live server. Check the recorded pid too,
+    // and skip whenever either signal says the proxy exists.
+    if fetchTeamClaudeStatus(port: teamClaudeServerPort()) != nil || teamClaudeServerProcessAlive() {
         print("TEAMCLAUDE-OAUTH-REFRESH-SKIPPED: 서버 실행 중 — config 단일 writer 유지")
         fflush(stdout)
         return 0
