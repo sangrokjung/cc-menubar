@@ -49,6 +49,14 @@ struct CodexCallStats {
     let profiles: [CodexProfileHealth]
 }
 
+enum CodexProxyState: Equatable {
+    case notConfigured   // server.json 없음 — 프록시 미사용 머신, 기존 동작 그대로
+    case unreachable     // server.json 있는데 HTTP 응답 없음 = 프록시 다운
+    case accountError    // 응답은 오는데 사용 가능한 계정 0
+    case blocked         // 계정은 살아있는데 전부 한도 차단
+    case ok
+}
+
 struct CodexHealth {
     let checkedAt: Date
     let overallStatus: String
@@ -81,11 +89,20 @@ struct CodexHealth {
     let scannedLogBytes: Int64
     let profiles: [CodexProfileHealth]
     let hints: [String]
+    var proxyState: CodexProxyState = .notConfigured
 
-    var isWarning: Bool { overallStatus == "warning" }
-    var isError: Bool { overallStatus == "error" }
+    var isWarning: Bool { overallStatus == "warning" || proxyState == .blocked }
+    var isError: Bool {
+        overallStatus == "error" || proxyState == .unreachable || proxyState == .accountError
+    }
 
     var titleSlot: String {
+        switch proxyState {
+        case .unreachable: return "Codex 오프라인"
+        case .accountError: return "Codex 재인증"
+        case .blocked: return "Codex 한도대기"
+        default: break
+        }
         if isError { return "Codex 재인증" }
         if !authPresent || (!hasApiKey && !hasTokens) { return "Codex 로그인" }
         if quotaEvents > 0 { return "Codex 쿼터 \(quotaEvents)" }
@@ -102,6 +119,7 @@ struct CodexHealth {
     }
 
     var statusLabel: String {
+        if proxyState == .unreachable { return "오프라인" }
         if isError { return "재인증" }
         if isWarning { return "주의" }
         return "정상"

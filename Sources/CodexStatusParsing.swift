@@ -72,6 +72,12 @@ func codexSessionsPath() -> String {
         ?? "\(codexHomePath())/sessions"
 }
 
+func teamCodexServerPort() -> Int? {
+    // ~/.config/teamcodex.server.json = {"pid":N,"port":3457,...} — 비밀 없음, 읽기 안전.
+    // 파일 없음/파싱 실패 = 이 머신에 codex 프록시 미설치 → nil (기존 동작 유지)
+    codexInt(readCodexJSON("\(NSHomeDirectory())/.config/teamcodex.server.json")?["port"])
+}
+
 func readCodexJSON(_ path: String) -> [String: Any]? {
     guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {

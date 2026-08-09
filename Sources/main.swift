@@ -3098,7 +3098,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self.isRefreshingCodex = false
                 self.refreshOpenDashboard()
                 self.updateTitle()
-                print("CODEX-REFRESH: status=\(codex.statusLabel) calls=\(codex.todayCalls)/\(codex.weekCalls)")
+                print("CODEX-REFRESH: status=\(codex.statusLabel) proxy=\(String(describing: codex.proxyState)) calls=\(codex.todayCalls)/\(codex.weekCalls)")
                 fflush(stdout)
             }
         }

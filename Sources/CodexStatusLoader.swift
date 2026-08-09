@@ -576,7 +576,51 @@ func loadCodexSessionStats(root: String) -> CodexCallStats {
     return stats
 }
 
+// 한도 차단 판정: rateLimitedUntil 이 미래이거나, 5h/7d 쿼터가 임계치 이상이면서 리셋이 아직 안 왔을 때.
+// 쿼터 필드가 없거나 리셋이 지난 값(stale)이면 teamClaudeCurrentQuotaUtilization 이 nil → 0 취급 = 차단 아님.
+func codexProxyAccountIsBlocked(_ account: [String: Any], threshold: Double, nowMs: Int64) -> Bool {
+    if let rateLimitedUntilMs = parseTeamClaudeTimeMs(account["rateLimitedUntil"]), rateLimitedUntilMs > nowMs {
+        return true
+    }
+    let quota = tcDict(account["quota"])
+    let sessionUsed = teamClaudeCurrentQuotaUtilization(
+        tcDouble(quota?["unified5h"]),
+        resetAtMs: parseTeamClaudeTimeMs(quota?["unified5hReset"]),
+        nowMs: nowMs
+    ) ?? 0
+    let weeklyUsed = teamClaudeCurrentQuotaUtilization(
+        tcDouble(quota?["unified7d"]),
+        resetAtMs: parseTeamClaudeTimeMs(quota?["unified7dReset"]),
+        nowMs: nowMs
+    ) ?? 0
+    return sessionUsed >= threshold || weeklyUsed >= threshold
+}
+
 func loadCodexHealth() -> CodexHealth {
+    var proxyState = CodexProxyState.notConfigured
+    var proxyHint: String?
+    if let port = teamCodexServerPort() {
+        if let proxyStatus = fetchTeamClaudeStatus(port: port) {
+            let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+            let threshold = tcDouble(proxyStatus["switchThreshold"]) ?? 0.995
+            let eligible = (tcArray(proxyStatus["accounts"]) ?? []).filter {
+                tcBool($0["enabled"]) != false && tcString($0["status"]) != "error"
+            }
+            if eligible.isEmpty {
+                proxyState = .accountError
+                proxyHint = "codex 계정 재인증 필요 — teamclaude codex login"
+            } else if eligible.allSatisfy({ codexProxyAccountIsBlocked($0, threshold: threshold, nowMs: nowMs) }) {
+                proxyState = .blocked
+                proxyHint = "codex 한도 대기 — 리셋까지 차단"
+            } else {
+                proxyState = .ok
+            }
+        } else {
+            proxyState = .unreachable
+            proxyHint = "teamcodex 프록시(:\(port)) 응답 없음 — launchctl bootstrap 필요"
+        }
+    }
+
     let home = codexHomePath()
     let fm = FileManager.default
     let authPath = "\(home)/auth.json"
@@ -631,14 +675,25 @@ func loadCodexHealth() -> CodexHealth {
     if max(stats.primaryUsedPercent ?? 0, stats.secondaryUsedPercent ?? 0) >= 90 {
         hints.append("Codex 제한 높음 \(formatCodexLimitPair(stats.primaryUsedPercent, stats.secondaryUsedPercent) ?? "-")")
     }
+    if let proxyHint = proxyHint {
+        hints.insert(proxyHint, at: 0)
+    }
 
-    let status: String
+    var status: String
     if authMalformed {
         status = "error"
     } else if !authFileExists || (!hasApiKey && !hasTokens) || staleRefresh || stats.quotaEvents > 0 || stats.errorEvents > 0 || max(stats.primaryUsedPercent ?? 0, stats.secondaryUsedPercent ?? 0) >= 90 {
         status = "warning"
     } else {
         status = "ok"
+    }
+    switch proxyState {
+    case .unreachable, .accountError:
+        status = "error"
+    case .blocked:
+        if status == "ok" { status = "warning" }
+    case .notConfigured, .ok:
+        break
     }
 
     return CodexHealth(
@@ -672,6 +727,7 @@ func loadCodexHealth() -> CodexHealth {
         scannedLogFiles: stats.scannedLogFiles,
         scannedLogBytes: stats.scannedLogBytes,
         profiles: stats.profiles,
-        hints: hints
+        hints: hints,
+        proxyState: proxyState
     )
 }
