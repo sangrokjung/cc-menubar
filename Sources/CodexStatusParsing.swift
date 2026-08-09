@@ -74,8 +74,13 @@ func codexSessionsPath() -> String {
 
 func teamCodexServerPort() -> Int? {
     // ~/.config/teamcodex.server.json = {"pid":N,"port":3457,...} — 비밀 없음, 읽기 안전.
-    // 파일 없음/파싱 실패 = 이 머신에 codex 프록시 미설치 → nil (기존 동작 유지)
-    codexInt(readCodexJSON("\(NSHomeDirectory())/.config/teamcodex.server.json")?["port"])
+    // 단 이 파일은 서버가 graceful 종료(bootout/unload)될 때 삭제된다 — 부재를 "프록시 미설치"로
+    // 읽으면 내려간 프록시가 '정상'으로 보인다. 설치 여부는 상시 존재하는 teamcodex.json 으로
+    // 판정하고(내용은 토큰이라 읽지 않는다 — 존재 확인만), 포트만 server.json 에서 읽는다.
+    if let port = codexInt(readCodexJSON("\(NSHomeDirectory())/.config/teamcodex.server.json")?["port"]) {
+        return port
+    }
+    return FileManager.default.fileExists(atPath: "\(NSHomeDirectory())/.config/teamcodex.json") ? 3457 : nil
 }
 
 func readCodexJSON(_ path: String) -> [String: Any]? {
