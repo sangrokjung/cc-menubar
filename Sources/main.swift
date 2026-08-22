@@ -1676,16 +1676,28 @@ final class TeamClaudeTableView: NSView {
                 : (sessionPercent != nil ? formatTeamClaudeDuration(row.sessionResetSeconds) : (attempted ? "확인필요" : "측정전"))
             drawText(sessionDetail, innerX + 398, y + 5, smallFont, muted)
 
+            // 주간·Fable 은 **칸마다 독립적으로** 그린다.
+            // 이전에는 teamClaudeQuotaPair(넷 다 있어야 성립)로 묶어 그려서, Fable 창 하나가
+            // 없으면 이미 알고 있는 주간 값까지 같이 "동기화중" 으로 숨겨졌다.
+            // 실제로 한도 소진된 계정은 그 티어로 요청이 안 나가 Fable 창을 영영 못 받는데
+            // (7d_oi 는 실요청 응답 헤더에만 붙는다), 정작 그때가 "주간 몇 %인지, 언제 리셋인지"를
+            // 가장 보고 싶은 순간이다 — 2026-08-22 dabu 가 주간 100%/리셋 08-23 02:00 로 확정돼
+            // 있는데도 두 칸 다 "동기화중" 으로 비어 보였다. 아는 값은 무조건 표시한다.
             let displayPair = teamClaudeQuotaPair(for: row)
-            let wkColor = tone(displayPair?.weeklyPercent)
-            drawText(displayPair.map { percentText($0.weeklyPercent) } ?? "동기화중", innerX + 450, y + 5, rowFont, displayPair != nil ? wkColor : yellow)
-            bar(displayPair?.weeklyPercent, x: innerX + 494, y: y + 10, width: 74, color: wkColor)
-            drawText(formatTeamClaudeDuration(displayPair?.weeklyResetSeconds), innerX + 578, y + 5, smallFont, muted)
+            let wkPercent = displayPair?.weeklyPercent ?? row.weeklyPercent
+            let wkReset = displayPair?.weeklyResetSeconds ?? row.weeklyResetSeconds
+            let fbPercent = displayPair?.fablePercent ?? row.fablePercent
+            let fbReset = displayPair?.fableResetSeconds ?? row.fableResetSeconds
 
-            let fbColor = tone(displayPair?.fablePercent)
-            drawText(displayPair.map { percentText($0.fablePercent) } ?? "동기화중", innerX + 620, y + 5, rowFont, displayPair != nil ? fbColor : yellow)
-            bar(displayPair?.fablePercent, x: innerX + 682, y: y + 10, width: 48, color: fbColor)
-            drawText(formatTeamClaudeDuration(displayPair?.fableResetSeconds), innerX + 738, y + 5, smallFont, muted)
+            let wkColor = tone(wkPercent)
+            drawText(wkPercent.map { percentText($0) } ?? "동기화중", innerX + 450, y + 5, rowFont, wkPercent != nil ? wkColor : yellow)
+            bar(wkPercent, x: innerX + 494, y: y + 10, width: 74, color: wkColor)
+            drawText(formatTeamClaudeDuration(wkReset), innerX + 578, y + 5, smallFont, muted)
+
+            let fbColor = tone(fbPercent)
+            drawText(fbPercent.map { percentText($0) } ?? "동기화중", innerX + 620, y + 5, rowFont, fbPercent != nil ? fbColor : yellow)
+            bar(fbPercent, x: innerX + 682, y: y + 10, width: 48, color: fbColor)
+            drawText(formatTeamClaudeDuration(fbReset), innerX + 738, y + 5, smallFont, muted)
             if let issue = row.measurementIssue {
                 if issue.canMeasureNow && !isMeasuring {
                     let rowActionRect = NSRect(x: innerX + 780, y: y + 2, width: 58, height: 22)
