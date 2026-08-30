@@ -2721,7 +2721,7 @@ func isClaudeActive() -> Bool {
 
 class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var statusItem: NSStatusItem?
-    var dataTimer: Timer?       // ccusage 갱신 (60초)
+    var dataTimer: Timer?       // ccusage 갱신 (900초)
     var statusTimer: Timer?     // TeamClaude/Codex 상태 갱신 (10초)
     var rollTimer: Timer?       // 정보 롤링 + 펄스 (1초)
     var activityTimer: Timer?   // 활동 감지 (5초)
@@ -2793,8 +2793,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         if let t = statusTimer { RunLoop.main.add(t, forMode: .common) }
 
-        // 60초마다 ccusage 갱신
-        dataTimer = Timer.scheduledTimer(withTimeInterval: 60.0, repeats: true) { [weak self] _ in
+        // 15분마다 ccusage 갱신 — 매 사이클이 ~/.claude/projects 전체(수 GB) 파싱이라
+        // 짧은 주기는 상시 CPU 버스트가 된다. 쿼터/상태는 위 statusTimer(10초)가 담당.
+        dataTimer = Timer.scheduledTimer(withTimeInterval: 900.0, repeats: true) { [weak self] _ in
             self?.loadUsageInBackground()
         }
         if let t = dataTimer { RunLoop.main.add(t, forMode: .common) }
