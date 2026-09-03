@@ -1729,9 +1729,11 @@ final class StatusMenuDashboardView: NSView {
 
     private var teamClaudeView: TeamClaudeTableView?
     private var codexView: CodexStatusView?
+    private var grokView: GrokStatusView?
     private var usageView: UsageDashboardView?
     private var renderedAccountCount = -1
     private var renderedCodexPresent = false
+    private var renderedGrokPresent = false
     private var renderedUsageHeight: CGFloat = 0
     override var isFlipped: Bool { true }
 
@@ -1748,16 +1750,23 @@ final class StatusMenuDashboardView: NSView {
         health == nil ? 0 : CodexStatusView.preferredHeight
     }
 
-    static func preferredHeight(teamClaude: TeamClaudeHealth?, codex: CodexHealth?, usage: UsageData?) -> CGFloat {
+    static func grokHeight(_ health: GrokHealth?) -> CGFloat {
+        health == nil ? 0 : GrokStatusView.preferredHeight
+    }
+
+    static func preferredHeight(teamClaude: TeamClaudeHealth?, codex: CodexHealth?, grok: GrokHealth?, usage: UsageData?) -> CGFloat {
         let team = teamHeight(teamClaude)
         let codex = codexHeight(codex)
+        let grok = grokHeight(grok)
         let usage = UsageDashboardView.preferredHeight(for: usage)
-        return 8 + team + (team > 0 ? 4 : 0) + codex + (codex > 0 ? 4 : 0) + usage + 8
+        return 8 + team + (team > 0 ? 4 : 0) + codex + (codex > 0 ? 4 : 0)
+            + grok + (grok > 0 ? 4 : 0) + usage + 8
     }
 
     func configure(
         teamClaude: TeamClaudeHealth?,
         codex: CodexHealth?,
+        grok: GrokHealth?,
         usage: UsageData?,
         parallelCount: Int,
         active: Bool,
@@ -1768,6 +1777,7 @@ final class StatusMenuDashboardView: NSView {
         subviews.removeAll()
         renderedAccountCount = teamClaude?.accounts.count ?? 0
         renderedCodexPresent = codex != nil
+        renderedGrokPresent = grok != nil
         renderedUsageHeight = UsageDashboardView.preferredHeight(for: usage)
         var y: CGFloat = 4
 
@@ -1807,6 +1817,14 @@ final class StatusMenuDashboardView: NSView {
             y += CodexStatusView.preferredHeight + 4
         }
 
+        if let grok = grok {
+            let view = GrokStatusView(frame: NSRect(x: 0, y: y, width: bounds.width, height: GrokStatusView.preferredHeight))
+            view.health = grok
+            addSubview(view)
+            grokView = view
+            y += GrokStatusView.preferredHeight + 4
+        }
+
         let usageHeight = UsageDashboardView.preferredHeight(for: usage)
         let view = UsageDashboardView(frame: NSRect(x: 0, y: y, width: bounds.width, height: usageHeight))
         view.usage = usage
@@ -1819,6 +1837,7 @@ final class StatusMenuDashboardView: NSView {
     func updateContent(
         teamClaude: TeamClaudeHealth?,
         codex: CodexHealth?,
+        grok: GrokHealth?,
         usage: UsageData?,
         parallelCount: Int,
         active: Bool,
@@ -1830,12 +1849,14 @@ final class StatusMenuDashboardView: NSView {
         let usageHeight = UsageDashboardView.preferredHeight(for: usage)
         let structureChanged = accountCount != renderedAccountCount
             || (codex != nil) != renderedCodexPresent
+            || (grok != nil) != renderedGrokPresent
             || usageHeight != renderedUsageHeight
         if structureChanged {
-            frame.size.height = Self.preferredHeight(teamClaude: teamClaude, codex: codex, usage: usage)
+            frame.size.height = Self.preferredHeight(teamClaude: teamClaude, codex: codex, grok: grok, usage: usage)
             configure(
                 teamClaude: teamClaude,
                 codex: codex,
+                grok: grok,
                 usage: usage,
                 parallelCount: parallelCount,
                 active: active,
@@ -1852,6 +1873,7 @@ final class StatusMenuDashboardView: NSView {
         teamClaudeView?.onMeasure = onMeasureTeamClaude
         codexView?.health = codex
         codexView?.usage = usage
+        grokView?.health = grok
         usageView?.usage = usage
         usageView?.parallelCount = parallelCount
         usageView?.active = active
@@ -2728,6 +2750,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var currentData: UsageData?
     var currentTeamClaude: TeamClaudeHealth?
     var currentCodex: CodexHealth?
+    var currentGrok: GrokHealth?
 
     // 롤링 상태
     var rollIndex = 0       // 현재 표시 중인 정보 슬롯
@@ -2742,7 +2765,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var teamClaudeRefreshCoordinator = TeamClaudeRefreshCoordinator()
     var isRefreshingTeamClaude: Bool { teamClaudeRefreshCoordinator.isRunning }
     var isRefreshingCodex = false
-    var isRefreshingStatus: Bool { isRefreshingTeamClaude || isRefreshingCodex }
+    var isRefreshingGrok = false
+    var isRefreshingStatus: Bool { isRefreshingTeamClaude || isRefreshingCodex || isRefreshingGrok }
     var isMeasuringTeamClaude = false
     var teamClaudeMeasureDetail: String?
     var teamClaudeConfigWatchGeneration = 0
@@ -2833,9 +2857,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         let teamClaudeSlot = currentTeamClaude?.titleSlot
         let codexSlot = currentCodex?.titleSlot
+        let grokSlot = currentGrok?.titleSlot
         // 데이터 없으면 최소 정보 — 병렬 세션 수만이라도 의미 있음
         guard let usage = currentData, let today = usage.today else {
-            return [teamClaudeSlot, codexSlot, "병렬 \(parallelCount)"].compactMap { $0 }
+            return [teamClaudeSlot, codexSlot, grokSlot, "병렬 \(parallelCount)"].compactMap { $0 }
         }
         let todayTokens = today.inputTokens + today.cacheCreationTokens
                         + today.cacheReadTokens + today.outputTokens
@@ -2849,6 +2874,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         var slots = [
             teamClaudeSlot,
             codexSlot,
+            grokSlot,
             "오늘 \(formatCost(today.totalCost))",
             "오늘 \(formatKRWShort(today.totalCost, rate: rate))",
             "토큰 \(formatTokens(todayTokens))",
@@ -2957,6 +2983,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         dashboard.updateContent(
             teamClaude: currentTeamClaude,
             codex: currentCodex,
+            grok: currentGrok,
             usage: currentData,
             parallelCount: parallelCount,
             active: isActive,
@@ -2977,6 +3004,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func loadFastStatusInBackground() {
         loadTeamClaudeStatusInBackground()
         loadCodexStatusInBackground()
+        loadGrokStatusInBackground()
     }
 
     func commitTeamClaudeHealth(_ candidate: TeamClaudeHealth, outageDuration: TimeInterval = 0) {
@@ -3117,6 +3145,29 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    // Grok: 사이드카(:3458)에 HTTP GET 한 번. JSONL 파싱은 사이드카가 자기 주기로 하므로
+    // 10초 statusTimer 에 올려도 ccusage 같은 CPU 버스트가 나지 않는다.
+    func loadGrokStatusInBackground() {
+        guard !isRefreshingGrok else { return }
+        isRefreshingGrok = true
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let grok = autoreleasepool { loadGrokHealth() }
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.currentGrok = grok
+                self.isRefreshingGrok = false
+                self.refreshOpenDashboard()
+                self.updateTitle()
+                if let grok = grok {
+                    print("GROK-REFRESH: status=\(grok.statusLabel) turns=\(grok.week.turns) week=\(formatGrokUsd(grok.week.costUsd))")
+                } else {
+                    print("GROK-REFRESH: 사이드카 미설치 — 섹션 숨김")
+                }
+                fflush(stdout)
+            }
+        }
+    }
+
     func loadUsageInBackground() {
         // ccusage는 느릴 수 있으므로 단일 실행만 허용한다.
         // 상태 갱신(TeamClaude/Codex)은 위 loadFastStatusInBackground 에서 별도로 즉시 처리한다.
@@ -3228,7 +3279,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // 메뉴 열릴 때마다 최신 데이터로 항목 재구성
         menu.removeAllItems()
 
-        let dashboardContentHeight = StatusMenuDashboardView.preferredHeight(teamClaude: currentTeamClaude, codex: currentCodex, usage: currentData)
+        let dashboardContentHeight = StatusMenuDashboardView.preferredHeight(teamClaude: currentTeamClaude, codex: currentCodex, grok: currentGrok, usage: currentData)
         let screenHeight = statusItem?.button?.window?.screen?.visibleFrame.height
             ?? NSScreen.main?.visibleFrame.height
             ?? 900
@@ -3239,6 +3290,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         dashboard.configure(
             teamClaude: currentTeamClaude,
             codex: currentCodex,
+            grok: currentGrok,
             usage: currentData,
             parallelCount: parallelCount,
             active: isActive,
