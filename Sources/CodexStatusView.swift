@@ -3,16 +3,14 @@ import Cocoa
 final class CodexStatusView: NSView {
     static func preferredHeight(for health: CodexHealth?) -> CGFloat {
         guard let health else { return 0 }
-        let accountBlock: CGFloat = health.proxyAccounts.isEmpty ? 0 : 34 + CGFloat(health.proxyAccounts.count) * 24
-        let profileRows = max(1, min(2, health.profiles.count))
-        let profileBlock: CGFloat = 34 + CGFloat(profileRows) * 24
-        return 12 + 48 + 64 + accountBlock + 8 + profileBlock + 40
+        let accountBlock: CGFloat = health.proxyAccounts.isEmpty ? 0 : 34 + CGFloat(health.proxyAccounts.count) * 26
+        return 12 + 48 + 64 + accountBlock + 28
     }
 
     var health: CodexHealth? {
         didSet {
             setAccessibilityLabel(health?.accessibilitySummary ?? "Codex 상태")
-            setAccessibilityHelp("GPT-5.6 작업 추천: 구현과 설계는 gpt-5.6 medium, 리뷰와 보안은 gpt-5.6-sol high, 탐색과 병렬 작업은 gpt-5.6-terra low, 분류와 반복 작업은 gpt-5.6-luna none 또는 low")
+            setAccessibilityHelp("Codex 5시간·7일 남은 쿼터")
             needsDisplay = true
         }
     }
@@ -124,9 +122,6 @@ final class CodexStatusView: NSView {
         let context = health.contextWindow.map { "\($0 / 1000)K ctx" } ?? "ctx -"
         let primaryColor = limitTone(health.primaryUsedPercent)
         let secondaryColor = limitTone(health.secondaryUsedPercent)
-        let codexModels = usage?.modelBreakdown.filter { $0.provider == "Codex" } ?? []
-        let codexMonthlyCost = codexModels.reduce(0) { $0 + $1.cost }
-        let codexMonthlyTokens = codexModels.reduce(0) { $0 + $1.tokens }
 
         drawText("Codex 사용량", innerX, topY, titleFont, text)
         pill(health.statusLabel, x: innerX + 118, y: topY - 2, color: tone)
@@ -144,9 +139,8 @@ final class CodexStatusView: NSView {
         metric("7일 남음", remain7d.map { formatCodexPercent($0) } ?? "측정 전",
                remain7d == nil ? "프록시 미측정" : "사용 \(formatCodexPercent(health.secondaryUsedPercent)) · 리셋 \(formatCodexReset(health.secondaryResetAt))",
                percent: health.secondaryUsedPercent, x: innerX + (statW + gap), y: statY, width: statW, color: secondaryColor)
-        metric("오늘 토큰", formatCodexTokens(health.todayTokens), "\(health.todayCalls)회", x: innerX + (statW + gap) * 2, y: statY, width: statW, color: blue)
-        let monthlyDetail = codexMonthlyCost > 0 ? formatKRWShort(codexMonthlyCost, rate: usage?.usdKrwRate ?? 1450) : formatCodexTokens(codexMonthlyTokens)
-        metric("월 환산비용", codexMonthlyCost > 0 ? formatCost(codexMonthlyCost) : "-", monthlyDetail, x: innerX + (statW + gap) * 3, y: statY, width: statW, color: blue)
+        metric("오늘", formatCodexTokens(health.todayTokens), "\(health.todayCalls)회", x: innerX + (statW + gap) * 2, y: statY, width: statW, color: blue)
+        metric("다음 리셋", formatCodexReset(health.primaryResetAt), "5h", x: innerX + (statW + gap) * 3, y: statY, width: statW, color: blue)
 
         var tableY = statY + 70
         if !health.proxyAccounts.isEmpty {
@@ -156,7 +150,7 @@ final class CodexStatusView: NSView {
             drawText("7일", innerX + 520, tableY + 7, headFont, muted)
             drawText("리셋", innerX + 730, tableY + 7, headFont, muted)
             for (i, row) in health.proxyAccounts.enumerated() {
-                let y = tableY + 34 + CGFloat(i) * 24
+                let y = tableY + 34 + CGFloat(i) * 26
                 if i % 2 == 1 {
                     fillRound(NSRect(x: innerX, y: y - 1, width: card.width - 32, height: 23), NSColor.white.withAlphaComponent(0.035), 7)
                 }
@@ -187,42 +181,10 @@ final class CodexStatusView: NSView {
                     : (row.weeklyPercent != nil ? "7d \(formatCodexReset(row.weeklyResetAt))" : "—")
                 drawText(resetText, innerX + 730, y + 2, smallFont, muted)
             }
-            tableY += 34 + CGFloat(health.proxyAccounts.count) * 24 + 8
+            tableY += 34 + CGFloat(health.proxyAccounts.count) * 26
         }
 
-        fillRound(NSRect(x: innerX, y: tableY, width: card.width - 32, height: 28), panel2, 8)
-        drawText("모델", innerX + 12, tableY + 7, headFont, muted)
-        drawText("호출", innerX + 250, tableY + 7, headFont, muted)
-        drawText("오늘 토큰", innerX + 345, tableY + 7, headFont, muted)
-        drawText("7일 토큰", innerX + 465, tableY + 7, headFont, muted)
-        drawText("상태", innerX + 585, tableY + 7, headFont, muted)
-        drawText("최근", innerX + 730, tableY + 7, headFont, muted)
-
-        let rows = Array(health.profiles.prefix(2))
-        if rows.isEmpty {
-            drawText("Codex 세션 사용 기록 없음", innerX + 12, tableY + 42, rowFont, dim)
-        } else {
-            for (i, row) in rows.enumerated() {
-                let y = tableY + 34 + CGFloat(i) * 24
-                if i % 2 == 1 {
-                    fillRound(NSRect(x: innerX, y: y - 1, width: card.width - 32, height: 23), NSColor.white.withAlphaComponent(0.035), 7)
-                }
-                let eventCount = row.quotaEvents + row.errorEvents
-                let eventText = eventCount > 0 ? "Q\(row.quotaEvents)/E\(row.errorEvents)" : formatCodexVerdict(row.lastVerdict)
-                let eventColor = row.quotaEvents > 0 ? red : (row.errorEvents > 0 ? yellow : green)
-                fillRound(NSRect(x: innerX + 10, y: y + 7, width: 8, height: 8), eventColor, 4)
-                drawText(row.profile, innerX + 24, y + 2, rowFont, text)
-                drawText("\(row.todayCalls)/\(row.weekCalls)", innerX + 250, y + 2, rowFont, row.todayCalls > 0 ? green : muted)
-                drawText(formatCodexTokens(row.todayTokens), innerX + 345, y + 2, rowFont, row.todayTokens > 0 ? green : muted)
-                drawText(formatCodexTokens(row.weekTokens), innerX + 465, y + 2, rowFont, row.weekTokens > 0 ? green : muted)
-                drawText(eventText, innerX + 585, y + 2, rowFont, eventColor)
-                drawText(formatCodexAge(row.lastAt), innerX + 730, y + 2, smallFont, muted)
-            }
-        }
-
-        let footerY = card.maxY - 24
-        let remainText = "5h 남음 \(formatCodexPercent(remain5h)) · 7d 남음 \(remain7d.map(formatCodexPercent) ?? "측정 전")"
-        drawText(remainText, innerX, footerY, smallFont, tone)
-        drawRight("tok \(formatCodexTokens(health.totalTokens))", card.maxX - 16, footerY, smallFont, dim)
+        let footerY = card.maxY - 22
+        drawText("초록 <70%    노랑 70-89%    빨강 >=90%    사용률 바", innerX, footerY, smallFont, muted)
     }
 }

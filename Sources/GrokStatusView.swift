@@ -1,12 +1,12 @@
 import Cocoa
 
 final class GrokStatusView: NSView {
-    static let preferredHeight: CGFloat = 256
+    static let preferredHeight: CGFloat = 168
 
     var health: GrokHealth? {
         didSet {
             setAccessibilityLabel(health?.accessibilitySummary ?? "Grok 상태")
-            setAccessibilityHelp("xAI 는 한도를 공개하지 않으므로 잔여 쿼터가 아니라 사용한 토큰과 비용만 표시합니다")
+            setAccessibilityHelp("Grok 주간 풀 남은 쿼터")
             needsDisplay = true
         }
     }
@@ -28,7 +28,6 @@ final class GrokStatusView: NSView {
 
         let bg = NSColor(calibratedRed: 0.06, green: 0.075, blue: 0.10, alpha: 0.97)
         let panel = NSColor(calibratedRed: 0.095, green: 0.115, blue: 0.15, alpha: 1.0)
-        let panel2 = NSColor(calibratedRed: 0.12, green: 0.14, blue: 0.18, alpha: 1.0)
         let line = NSColor(calibratedRed: 0.23, green: 0.27, blue: 0.34, alpha: 1.0)
         let text = NSColor(calibratedRed: 0.92, green: 0.95, blue: 0.98, alpha: 1.0)
         let muted = NSColor(calibratedRed: 0.55, green: 0.61, blue: 0.70, alpha: 1.0)
@@ -42,7 +41,6 @@ final class GrokStatusView: NSView {
         let titleFont = NSFont.systemFont(ofSize: 18, weight: .bold)
         let subFont = NSFont.systemFont(ofSize: 13, weight: .medium)
         let headFont = NSFont.systemFont(ofSize: 12, weight: .semibold)
-        let rowFont = NSFont.monospacedSystemFont(ofSize: 13, weight: .medium)
         let smallFont = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
 
         func attrs(_ font: NSFont, _ color: NSColor) -> [NSAttributedString.Key: Any] {
@@ -142,8 +140,8 @@ final class GrokStatusView: NSView {
         }
         metric("오늘", formatGrokUsd(health.today.costUsd), "\(formatCodexTokens(health.today.totalTokens)) · \(health.today.turns)턴",
                x: innerX + (statW + gap), y: statY, width: statW, color: health.today.turns > 0 ? green : muted)
-        metric("주간 토큰", formatCodexTokens(health.week.totalTokens), "\(formatGrokUsd(health.week.costUsd))",
-               x: innerX + (statW + gap) * 2, y: statY, width: statW, color: accent)
+        metric("주간 사용", formatCodexPercent(health.creditUsedPercent), "\(formatCodexTokens(health.week.totalTokens))",
+               percent: health.creditUsedPercent, x: innerX + (statW + gap) * 2, y: statY, width: statW, color: usedColor)
 
         var elapsedPercent: Double?
         if let start = health.periodStart, let end = health.periodEnd, end > start {
@@ -154,55 +152,11 @@ final class GrokStatusView: NSView {
         metric("창 리셋", formatGrokRemaining(health.periodEnd), elapsedDetail,
                percent: elapsedPercent, x: innerX + (statW + gap) * 3, y: statY, width: statW, color: yellow)
 
-        // ── 모델별 ──────────────────────────────────────────────────────────
-        let tableY = statY + 70
-        fillRound(NSRect(x: innerX, y: tableY, width: card.width - 32, height: 28), panel2, 8)
-        drawText("모델", innerX + 12, tableY + 7, headFont, muted)
-        drawText("호출", innerX + 250, tableY + 7, headFont, muted)
-        drawText("입력", innerX + 345, tableY + 7, headFont, muted)
-        drawText("출력", innerX + 465, tableY + 7, headFont, muted)
-        drawText("캐시읽기", innerX + 585, tableY + 7, headFont, muted)
-        drawText("비용", innerX + 730, tableY + 7, headFont, muted)
-
-        let rows = Array(health.models.prefix(2))
-        if rows.isEmpty {
-            let empty = health.serviceState == .unreachable
-                ? "사이드카 응답 없음 — 집계 불가"
-                : "Grok 세션 사용 기록 없음"
-            drawText(empty, innerX + 12, tableY + 42, rowFont, dim)
+        let footerY = card.maxY - 22
+        if let hint = health.hint, health.isError {
+            drawText(hint, innerX, footerY, smallFont, red)
         } else {
-            for (i, row) in rows.enumerated() {
-                let y = tableY + 34 + CGFloat(i) * 24
-                if i % 2 == 1 {
-                    fillRound(NSRect(x: innerX, y: y - 1, width: card.width - 32, height: 23), NSColor.white.withAlphaComponent(0.035), 7)
-                }
-                fillRound(NSRect(x: innerX + 10, y: y + 7, width: 8, height: 8), accent, 4)
-                drawText(grokShortenModelName(row.model), innerX + 24, y + 2, rowFont, text)
-                drawText("\(row.agg.modelCalls)", innerX + 250, y + 2, rowFont, row.agg.modelCalls > 0 ? green : muted)
-                drawText(formatCodexTokens(row.agg.inputTokens), innerX + 345, y + 2, rowFont, muted)
-                drawText(formatCodexTokens(row.agg.outputTokens), innerX + 465, y + 2, rowFont, muted)
-                drawText(formatCodexTokens(row.agg.cachedReadTokens), innerX + 585, y + 2, rowFont, muted)
-                drawText(formatGrokUsd(row.agg.costUsd), innerX + 730, y + 2, rowFont, accent)
-            }
+            drawText("주간 풀    일일 한도 없음    초록 <70% 사용", innerX, footerY, smallFont, muted)
         }
-
-        // ── 한도 안내 ────────────────────────────────────────────────────────
-        // 이 박스는 장식이 아니다. Claude/Codex 섹션에는 5h·7d 사용률 바가 있는데
-        // Grok 만 없는 이유를 화면에서 바로 알 수 있어야 오해가 안 생긴다.
-        let noteY = tableY + 88
-        let noteRect = NSRect(x: innerX, y: noteY, width: card.width - 32, height: 28)
-        fillRound(noteRect, panel2, 8)
-        strokeRound(noteRect, line.withAlphaComponent(0.8), 8)
-        let noteBody = health.quotaAvailable
-            ? "주간 풀 \(formatCodexPercent(health.creditUsedPercent)) 사용 · 남음 \(formatCodexPercent(health.creditRemainingPercent)) · 일일 한도 없음"
-            : "주간 풀 % 없음 — grok 을 한 번 실행하면 billing 이 갱신된다"
-        drawText(noteBody, noteRect.minX + 12, noteRect.minY + 7, smallFont, dim)
-
-        let footerY = card.maxY - 30
-        if let hint = health.hint {
-            drawText(hint, innerX, footerY, smallFont, health.isError ? red : dim)
-        }
-        drawRight("누적 \(formatCodexTokens(health.total.totalTokens)) · \(formatGrokUsd(health.total.costUsd)) · :\(health.port ?? 3458)",
-                  card.maxX - 16, footerY, smallFont, dim)
     }
 }
