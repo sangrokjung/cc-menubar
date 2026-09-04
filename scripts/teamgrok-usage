@@ -1,0 +1,436 @@
+#!/opt/homebrew/bin/node
+// teamgrok-usage — Grok 사용량 사이드카.
+//
+// teamclaude 의 세 번째 provider 가 *아니다*. Grok 은 rate-limit 헤더를 전혀 내지 않아서
+// (binary 전체 strings -a 에 x-ratelimit-* 0건, retry-after 뿐) teamclaude 의 쿼터 엔진
+// (account-manager.js:874 updateQuota, 100% 응답헤더 기반)이 배울 수 있는 게 없다.
+// 게다가 xAI 계정이 하나뿐이라 로테이션 가치도 0이다. 그래서 프록시를 요청 경로에 끼우지
+// 않고, 이미 로컬에 있는 실데이터만 모아 cc-menubar 가 읽는 /teamclaude/status 계약
+// 그대로 내준다. teamclaude 포크는 한 줄도 건드리지 않는다.
+//
+// 데이터 출처 (둘 다 grok CLI 가 알아서 쓰는 파일):
+//   ~/.grok/sessions/<enc-cwd>/<uuid>/updates.jsonl
+//       sessionUpdate == "turn_completed" 줄의 usage{} — 토큰 + costUsdTicks(1 USD = 1e10).
+//       usage 는 선택 필드다: stop_reason=="error" 인 턴에는 아예 없다. 없으면 0 이 아니라
+//       "모름"으로 센다(에러 턴 수만 따로 집계).
+//   ~/.grok/logs/unified.jsonl
+//       "billing: fetched credits config" 줄 — 구독 티어와 주간 청구 창(start/end).
+//
+// 일부러 안 하는 것: 쿼터 퍼센트. xAI 는 한도(분모)를 어디에도 노출하지 않는다 —
+// 사용량은 알 수 있어도 "몇 % 남았는지"는 정직하게 만들 수 없다. quota.unified5h/7d 는
+// null 로 두고(메뉴바에서 '모름'으로 렌더), unified7dReset 만 실제 청구 창 종료로 채운다.
+//
+// 재시작: launchctl kickstart -k gui/$UID/com.westwave.teamgrok (읽기 전용이라 언제 죽여도 안전 —
+// teamclaude 와 달리 in-flight 스트림을 들고 있지 않다).
+
+import { createServer } from 'node:http';
+import { readFile, writeFile, readdir, stat, open, mkdir } from 'node:fs/promises';
+import { join, dirname } from 'node:path';
+import { homedir } from 'node:os';
+
+const HOME = homedir();
+const GROK_HOME = process.env.GROK_HOME || join(HOME, '.grok');
+const SESSIONS_DIR = join(GROK_HOME, 'sessions');
+const UNIFIED_LOG = join(GROK_HOME, 'logs', 'unified.jsonl');
+const AUTH_PATH = join(GROK_HOME, 'auth.json');
+const STATE_PATH = process.env.TEAMGROK_STATE || join(HOME, '.config', 'teamgrok.usage-state.json');
+// 메뉴바가 포트를 여기서 읽는다. 스크래치 포트로 시험할 땐 반드시 같이 덮어써서
+// 실서버 항목을 지우지 말 것 (TEAMGROK_SERVER_STATE=/tmp/... 로).
+const SERVER_STATE_PATH = process.env.TEAMGROK_SERVER_STATE
+  || join(HOME, '.config', 'teamgrok.server.json');
+const PORT = Number(process.env.TEAMGROK_PORT || 3458);
+const SCAN_INTERVAL_MS = Number(process.env.TEAMGROK_SCAN_MS || 20_000);
+
+// 1 USD = 1e10 ticks (14-headless-mode.md:192).
+const TICKS_PER_USD = 1e10;
+// 턴 기록 보존 한도. 넘으면 오래된 것부터 버린다 — 창별 집계(오늘/이번 주)만 쓰므로
+// 90일이면 충분하고, 상태 파일이 무한히 자라는 걸 막는다.
+const TURN_RETENTION_MS = 90 * 24 * 3600 * 1000;
+// unified.jsonl 은 계속 자란다. billing 줄은 CLI 실행마다 2~3개씩 append 되므로
+// 꼬리만 읽으면 최신 값을 항상 잡는다.
+const UNIFIED_TAIL_BYTES = 512 * 1024;
+
+const log = (...a) => console.log(new Date().toISOString(), ...a);
+
+// ── 상태 ──────────────────────────────────────────────────────────────────────
+// files: 경로 -> {offset, size, ino}  이미 읽은 바이트를 다시 안 읽기 위한 커서.
+//        updates.jsonl 은 세션 하나가 1MB 를 넘기 때문에 매 스캔 전체 재파싱은
+//        ccusage 폴링 버스트와 같은 CPU 사고가 된다.
+// turns: [{t, in, out, total, cached, reasoning, calls, ticks, model, err}]
+let state = { version: 1, files: {}, turns: [] };
+let snapshot = null;      // 마지막으로 만든 /teamclaude/status 응답
+let lastScanError = null;
+
+async function loadState() {
+  try {
+    const raw = JSON.parse(await readFile(STATE_PATH, 'utf-8'));
+    if (raw && raw.version === 1 && raw.files && Array.isArray(raw.turns)) state = raw;
+  } catch { /* 없거나 깨졌으면 빈 상태에서 전체 스캔 */ }
+}
+
+async function saveState() {
+  try {
+    await mkdir(dirname(STATE_PATH), { recursive: true });
+    await writeFile(STATE_PATH, JSON.stringify(state), { mode: 0o600 });
+  } catch (err) { log('state write failed:', err.message); }
+}
+
+// ── 세션 스캔 ─────────────────────────────────────────────────────────────────
+async function listUpdateFiles() {
+  const out = [];
+  let cwdDirs;
+  try {
+    cwdDirs = await readdir(SESSIONS_DIR, { withFileTypes: true });
+  } catch { return out; }
+  for (const cwdDir of cwdDirs) {
+    if (!cwdDir.isDirectory()) continue;
+    let sessions;
+    try {
+      sessions = await readdir(join(SESSIONS_DIR, cwdDir.name), { withFileTypes: true });
+    } catch { continue; }
+    for (const s of sessions) {
+      if (s.isDirectory()) out.push(join(SESSIONS_DIR, cwdDir.name, s.name, 'updates.jsonl'));
+    }
+  }
+  return out;
+}
+
+function parseTurn(line) {
+  let obj;
+  try { obj = JSON.parse(line); } catch { return null; }
+  const u = obj?.params?.update;
+  if (!u || u.sessionUpdate !== 'turn_completed') return null;
+
+  // 타임스탬프: _meta.agentTimestampMs(ms) 우선, 없으면 top-level timestamp(초).
+  const ms = Number(obj?.params?._meta?.agentTimestampMs);
+  const sec = Number(obj?.timestamp);
+  const t = Number.isFinite(ms) ? ms : (Number.isFinite(sec) ? sec * 1000 : null);
+  if (t === null) return null;
+
+  const usage = u.usage;
+  if (!usage || typeof usage !== 'object') {
+    // 에러 턴 등 usage 가 없는 턴. 0 으로 세면 사용량을 과소보고하게 되므로
+    // 토큰은 안 세고 "usage 없는 턴"으로만 기록한다.
+    return { t, err: 1 };
+  }
+  const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+  const models = usage.modelUsage && typeof usage.modelUsage === 'object'
+    ? Object.keys(usage.modelUsage) : [];
+  return {
+    t,
+    in: num(usage.inputTokens),
+    out: num(usage.outputTokens),
+    total: num(usage.totalTokens),
+    cached: num(usage.cachedReadTokens),
+    reasoning: num(usage.reasoningTokens),
+    calls: num(usage.modelCalls),
+    // costUsdTicks 는 OAuth/세션 경로에서 서버가 각인 안 할 수 있다(문서 경고).
+    // 없으면 0 이 아니라 null — "무료"가 아니라 "모름"이다.
+    ticks: Number.isFinite(Number(usage.costUsdTicks)) ? Number(usage.costUsdTicks) : null,
+    model: models.length === 1 ? models[0] : (models[0] || null),
+  };
+}
+
+async function scanFile(path) {
+  let st;
+  try { st = await stat(path); } catch { return 0; }
+
+  const prev = state.files[path];
+  let offset = 0;
+  // 파일이 새로 생겼거나(ino 변경), 잘렸으면(size < offset) 처음부터 다시 읽는다.
+  if (prev && prev.ino === st.ino && st.size >= prev.offset) offset = prev.offset;
+  if (st.size === offset) { state.files[path] = { offset, size: st.size, ino: st.ino }; return 0; }
+
+  const fh = await open(path, 'r');
+  try {
+    const len = st.size - offset;
+    const buf = Buffer.allocUnsafe(len);
+    await fh.read(buf, 0, len, offset);
+    const text = buf.toString('utf-8');
+
+    // 마지막 줄이 잘렸을 수 있다(쓰는 중). 마지막 개행까지만 소비하고 커서를 거기에 둔다.
+    const lastNl = text.lastIndexOf('\n');
+    const consumable = lastNl === -1 ? '' : text.slice(0, lastNl + 1);
+    const consumedBytes = Buffer.byteLength(consumable, 'utf-8');
+
+    let added = 0;
+    for (const line of consumable.split('\n')) {
+      if (!line) continue;
+      const turn = parseTurn(line);
+      if (turn) { state.turns.push(turn); added++; }
+    }
+    state.files[path] = { offset: offset + consumedBytes, size: st.size, ino: st.ino };
+    return added;
+  } finally {
+    await fh.close();
+  }
+}
+
+async function scanAll() {
+  const files = await listUpdateFiles();
+  const present = new Set(files);
+  // 사라진 세션 디렉터리의 커서는 버린다(디스크 청소/세션 삭제).
+  for (const p of Object.keys(state.files)) if (!present.has(p)) delete state.files[p];
+
+  let added = 0;
+  for (const f of files) {
+    try { added += await scanFile(f); } catch (err) { log('scan failed', f, err.message); }
+  }
+
+  const cutoff = Date.now() - TURN_RETENTION_MS;
+  const before = state.turns.length;
+  state.turns = state.turns.filter((t) => t.t >= cutoff);
+  state.turns.sort((a, b) => a.t - b.t);
+
+  return { files: files.length, added, pruned: before - state.turns.length };
+}
+
+// ── billing ──────────────────────────────────────────────────────────────────
+async function readBilling() {
+  let st;
+  try { st = await stat(UNIFIED_LOG); } catch { return null; }
+  const start = Math.max(0, st.size - UNIFIED_TAIL_BYTES);
+  const fh = await open(UNIFIED_LOG, 'r');
+  let text;
+  try {
+    const buf = Buffer.allocUnsafe(st.size - start);
+    await fh.read(buf, 0, buf.length, start);
+    text = buf.toString('utf-8');
+  } finally {
+    await fh.close();
+  }
+
+  let latest = null;
+  for (const line of text.split('\n')) {
+    if (!line.includes('billing: fetched credits config')) continue;
+    try {
+      const obj = JSON.parse(line);
+      if (obj?.msg === 'billing: fetched credits config') latest = obj;
+    } catch { /* 꼬리 첫 줄이 잘렸을 수 있다 */ }
+  }
+  if (!latest) return null;
+
+  const cfg = latest.ctx?.config || {};
+  const period = cfg.currentPeriod || {};
+  const toMs = (s) => { const d = Date.parse(s); return Number.isFinite(d) ? d : null; };
+  return {
+    observedAt: toMs(latest.ts),
+    subscriptionTier: latest.ctx?.subscriptionTier ?? null,
+    isUnifiedBillingUser: cfg.isUnifiedBillingUser ?? null,
+    period: {
+      type: period.type ?? null,
+      start: period.start ?? cfg.billingPeriodStart ?? null,
+      end: period.end ?? cfg.billingPeriodEnd ?? null,
+      startMs: toMs(period.start ?? cfg.billingPeriodStart),
+      endMs: toMs(period.end ?? cfg.billingPeriodEnd),
+    },
+    // 값이 다 0 인 계정도 있다. 0 과 null 을 구분해서 그대로 넘긴다.
+    onDemandCap: cfg.onDemandCap?.val ?? null,
+    onDemandUsed: cfg.onDemandUsed?.val ?? null,
+    prepaidBalance: cfg.prepaidBalance?.val ?? null,
+  };
+}
+
+// 이메일만 뽑는다. key/refresh_token 은 절대 읽어서 보관하지 않는다 —
+// 뽑는 즉시 나머지는 버린다.
+async function readAccountLabel() {
+  try {
+    const raw = JSON.parse(await readFile(AUTH_PATH, 'utf-8'));
+    for (const v of Object.values(raw || {})) {
+      if (v && typeof v === 'object' && typeof v.email === 'string' && v.email) return v.email;
+    }
+  } catch { /* 없으면 라벨 없이 */ }
+  return null;
+}
+
+// ── 집계 ─────────────────────────────────────────────────────────────────────
+function emptyAgg() {
+  return {
+    turns: 0, errorTurns: 0, modelCalls: 0,
+    inputTokens: 0, outputTokens: 0, totalTokens: 0,
+    cachedReadTokens: 0, reasoningTokens: 0,
+    costUsd: 0, costUnstampedTurns: 0,
+  };
+}
+
+function addTurn(agg, t) {
+  if (t.err) { agg.errorTurns++; agg.turns++; return; }
+  agg.turns++;
+  agg.modelCalls += t.calls || 0;
+  agg.inputTokens += t.in || 0;
+  agg.outputTokens += t.out || 0;
+  agg.totalTokens += t.total || 0;
+  agg.cachedReadTokens += t.cached || 0;
+  agg.reasoningTokens += t.reasoning || 0;
+  if (t.ticks === null || t.ticks === undefined) agg.costUnstampedTurns++;
+  else agg.costUsd += t.ticks / TICKS_PER_USD;
+}
+
+function round(agg) {
+  // 부동소수 누적 노이즈 제거. ticks 는 정수라 6자리면 충분하다.
+  agg.costUsd = Math.round(agg.costUsd * 1e6) / 1e6;
+  return agg;
+}
+
+function localMidnightMs(now) {
+  const d = new Date(now);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
+function aggregate(turns, billing, now) {
+  const today = emptyAgg();
+  const week = emptyAgg();
+  const total = emptyAgg();
+  const byModel = {};
+
+  const midnight = localMidnightMs(now);
+  // 주간 창은 청구 창이 정본. billing 을 못 읽었으면 7일 롤링으로 폴백한다.
+  const weekStart = billing?.period?.startMs ?? (now - 7 * 24 * 3600 * 1000);
+
+  for (const t of turns) {
+    addTurn(total, t);
+    if (t.t >= midnight) addTurn(today, t);
+    if (t.t >= weekStart) addTurn(week, t);
+    if (!t.err && t.model) {
+      byModel[t.model] ??= emptyAgg();
+      addTurn(byModel[t.model], t);
+    }
+  }
+  for (const m of Object.values(byModel)) round(m);
+  return { today: round(today), week: round(week), total: round(total), byModel };
+}
+
+// ── /teamclaude/status 응답 ──────────────────────────────────────────────────
+function buildSnapshot({ agg, billing, accountLabel, scan, now }) {
+  const lastTurn = state.turns.length ? state.turns[state.turns.length - 1].t : null;
+
+  return {
+    provider: 'grok',
+    // teamclaude 와 같은 필드명 — tc-health 류 범용 도구가 그대로 읽는다.
+    currentAccount: accountLabel || 'grok',
+    switchThreshold: 0.98,
+    accounts: [{
+      name: accountLabel || 'grok',
+      type: 'oauth',
+      provider: 'grok',
+      enabled: true,
+      status: 'active',
+      priority: 1,
+      inflight: 0,
+      maxConcurrent: 1,
+      quota: {
+        // xAI 는 한도를 노출하지 않는다 → 퍼센트는 만들 수 없다. null = 모름.
+        // (메뉴바의 teamClaudeCurrentQuotaUtilization 은 nil 을 0 으로 취급하므로
+        //  '차단됨'으로 잘못 뜨지 않는다.)
+        unified5h: null,
+        unified5hReset: null,
+        unified7d: null,
+        // 이것만 실제 값이다 — 청구 창 종료 시각. 숫자(epoch ms)로 준다:
+        // 메뉴바의 parseTeamClaudeTimeMs 는 숫자를 그대로 받지만 문자열은
+        // ISO 포맷터를 타는데 xAI 는 6자리 소수를 쓴다(파싱 불안정).
+        unified7dReset: billing?.period?.endMs ?? null,
+        unifiedStatus: 'unmeasured',
+      },
+      usage: {
+        totalRequests: agg.total.modelCalls,
+        totalInputTokens: agg.total.inputTokens,
+        totalOutputTokens: agg.total.outputTokens,
+        lastUsed: lastTurn,
+      },
+    }],
+    // Grok 전용 섹션 — 메뉴바 Grok 뷰가 읽는다.
+    grok: {
+      subscriptionTier: billing?.subscriptionTier ?? null,
+      isUnifiedBillingUser: billing?.isUnifiedBillingUser ?? null,
+      period: billing?.period ?? null,
+      onDemandCap: billing?.onDemandCap ?? null,
+      onDemandUsed: billing?.onDemandUsed ?? null,
+      prepaidBalance: billing?.prepaidBalance ?? null,
+      billingObservedAt: billing?.observedAt ?? null,
+      today: agg.today,
+      week: agg.week,
+      total: agg.total,
+      byModel: agg.byModel,
+      // 한도가 없다는 사실 자체를 응답에 박아둔다. 나중에 이 값을 읽는 쪽이
+      // 퍼센트를 지어내지 않도록.
+      quotaAvailable: false,
+      quotaNote: 'xAI exposes no limit/denominator; spend and tokens only.',
+      sessions: scan.files,
+      lastScanAt: now,
+      lastScanError,
+    },
+  };
+}
+
+async function refresh() {
+  const now = Date.now();
+  let scan = { files: 0, added: 0, pruned: 0 };
+  try {
+    scan = await scanAll();
+    lastScanError = null;
+  } catch (err) {
+    lastScanError = err.message;
+    log('scan error:', err.message);
+  }
+  const [billing, accountLabel] = await Promise.all([
+    readBilling().catch(() => null),
+    readAccountLabel().catch(() => null),
+  ]);
+  const agg = aggregate(state.turns, billing, now);
+  snapshot = buildSnapshot({ agg, billing, accountLabel, scan, now });
+  if (scan.added || scan.pruned) await saveState();
+  return scan;
+}
+
+// ── HTTP ─────────────────────────────────────────────────────────────────────
+const server = createServer((req, res) => {
+  const send = (code, body) => {
+    const json = JSON.stringify(body);
+    res.writeHead(code, {
+      'content-type': 'application/json; charset=utf-8',
+      'content-length': Buffer.byteLength(json),
+      'cache-control': 'no-store',
+    });
+    res.end(json);
+  };
+  const path = (req.url || '').split('?')[0];
+  if (path === '/teamclaude/status' || path === '/status') {
+    if (!snapshot) return send(503, { error: 'not ready' });
+    return send(200, snapshot);
+  }
+  if (path === '/health') {
+    return send(200, { ok: true, pid: process.pid, port: PORT, turns: state.turns.length, lastScanError });
+  }
+  send(404, { error: 'not found' });
+});
+
+async function main() {
+  await loadState();
+  const first = await refresh();
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    // 루프백만. 이 데이터는 밖으로 나갈 이유가 없다.
+    server.listen(PORT, '127.0.0.1', resolve);
+  });
+  await mkdir(dirname(SERVER_STATE_PATH), { recursive: true });
+  await writeFile(SERVER_STATE_PATH, JSON.stringify({
+    pid: process.pid, port: PORT, startedAt: new Date().toISOString(), source: 'teamgrok-usage',
+  }, null, 2) + '\n', { mode: 0o600 });
+  log(`teamgrok-usage on 127.0.0.1:${PORT} — ${first.files} session files, ${state.turns.length} turns`);
+
+  const timer = setInterval(() => { refresh().catch((e) => log('refresh failed:', e.message)); }, SCAN_INTERVAL_MS);
+  timer.unref?.();
+  setInterval(() => {}, 1 << 30); // keep alive
+
+  const bye = async (sig) => {
+    log(`${sig} — saving state and exiting`);
+    try { await saveState(); } catch { /* best effort */ }
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 2000).unref();
+  };
+  process.on('SIGTERM', () => bye('SIGTERM'));
+  process.on('SIGINT', () => bye('SIGINT'));
+}
+
+main().catch((err) => { log('fatal:', err); process.exit(1); });

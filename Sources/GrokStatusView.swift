@@ -1,7 +1,7 @@
 import Cocoa
 
 final class GrokStatusView: NSView {
-    static let preferredHeight: CGFloat = 292
+    static let preferredHeight: CGFloat = 256
 
     var health: GrokHealth? {
         didSet {
@@ -159,7 +159,7 @@ final class GrokStatusView: NSView {
         drawText("캐시읽기", innerX + 585, tableY + 7, headFont, muted)
         drawText("비용", innerX + 730, tableY + 7, headFont, muted)
 
-        let rows = Array(health.models.prefix(3))
+        let rows = Array(health.models.prefix(2))
         if rows.isEmpty {
             let empty = health.serviceState == .unreachable
                 ? "사이드카 응답 없음 — 집계 불가"
@@ -184,16 +184,14 @@ final class GrokStatusView: NSView {
         // ── 한도 안내 ────────────────────────────────────────────────────────
         // 이 박스는 장식이 아니다. Claude/Codex 섹션에는 5h·7d 사용률 바가 있는데
         // Grok 만 없는 이유를 화면에서 바로 알 수 있어야 오해가 안 생긴다.
-        let noteY = tableY + 112
-        let noteRect = NSRect(x: innerX, y: noteY, width: card.width - 32, height: 44)
+        let noteY = tableY + 88
+        let noteRect = NSRect(x: innerX, y: noteY, width: card.width - 32, height: 28)
         fillRound(noteRect, panel2, 8)
         strokeRound(noteRect, line.withAlphaComponent(0.8), 8)
-        let noteTitle = health.quotaAvailable ? "쿼터" : "쿼터 표시 없음"
-        drawText(noteTitle, noteRect.minX + 12, noteRect.minY + 7, subFont, text)
         let noteBody = health.quotaAvailable
-            ? "사이드카가 한도를 보고했다 — 잔여율 표시 가능"
-            : "xAI 는 한도(분모)를 노출하지 않는다 — rate-limit 헤더도, 사용량 API 도 없다. 그래서 잔여율 대신 실제 쓴 양만 표시한다."
-        drawText(noteBody, noteRect.minX + 12, noteRect.minY + 25, smallFont, dim)
+            ? "쿼터 있음 — 잔여율 표시 가능"
+            : "쿼터 없음 — xAI 는 한도(분모)를 안 준다. 잔여율 대신 쓴 양만 표시."
+        drawText(noteBody, noteRect.minX + 12, noteRect.minY + 7, smallFont, dim)
 
         let footerY = card.maxY - 30
         if let hint = health.hint {

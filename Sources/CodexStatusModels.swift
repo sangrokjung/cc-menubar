@@ -13,6 +13,17 @@ let codexModelRecommendations = [
     CodexModelRecommendation(task: "분류·반복", model: "gpt-5.6-luna", effort: "none / low"),
 ]
 
+struct CodexProxyAccount: Equatable {
+    let name: String
+    let enabled: Bool
+    let status: String
+    /// 0–100. nil = 리셋 없어 측정 전. 프록시 unified* 는 0–1이라 로더에서 *100 한다.
+    let sessionPercent: Double?
+    let weeklyPercent: Double?
+    let sessionResetAt: Date?
+    let weeklyResetAt: Date?
+}
+
 struct CodexProfileHealth {
     let profile: String
     let todayCalls: Int
@@ -88,6 +99,7 @@ struct CodexHealth {
     let scannedLogFiles: Int
     let scannedLogBytes: Int64
     let profiles: [CodexProfileHealth]
+    let proxyAccounts: [CodexProxyAccount]
     let hints: [String]
     var proxyState: CodexProxyState = .notConfigured
 

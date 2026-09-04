@@ -95,6 +95,11 @@ fi
 info "Installing binary: ${BINARY_DST}"
 
 mkdir -p "${INSTALL_DIR}"
+if [[ -f "${BINARY_DST}" ]]; then
+    BAK="${BINARY_DST}.bak-$(date +%Y%m%d-%H%M%S)"
+    cp -f "${BINARY_DST}" "${BAK}"
+    success "Previous binary saved: ${BAK}"
+fi
 cp -f "${BINARY_SRC}" "${BINARY_DST}"
 chmod +x "${BINARY_DST}"
 
@@ -140,7 +145,37 @@ else
     fi
 fi
 
-# ── 5. summary ─────────────────────────────────
+# ── 5. teamgrok-usage sidecar (read-only Grok aggregator) ──
+TEAMGROK_SRC="${SCRIPT_DIR}/scripts/teamgrok-usage"
+TEAMGROK_DST="${HOME}/.claude/bin/teamgrok-usage"
+TEAMGROK_LABEL="com.westwave.teamgrok"
+TEAMGROK_PLIST="${LAUNCH_AGENTS_DIR}/${TEAMGROK_LABEL}.plist"
+TEAMGROK_TEMPLATE="${SCRIPT_DIR}/scripts/com.westwave.teamgrok.plist.template"
+
+if [[ -f "${TEAMGROK_SRC}" ]]; then
+    info "Installing teamgrok-usage sidecar..."
+    mkdir -p "${HOME}/.claude/bin"
+    cp -f "${TEAMGROK_SRC}" "${TEAMGROK_DST}"
+    chmod 755 "${TEAMGROK_DST}"
+    success "Sidecar script: ${TEAMGROK_DST}"
+    if [[ -f "${TEAMGROK_PLIST}" ]]; then
+        warn "LaunchAgent ${TEAMGROK_LABEL} already exists — not overwriting, not restarting"
+    elif [[ -f "${TEAMGROK_TEMPLATE}" ]]; then
+        mkdir -p "${LAUNCH_AGENTS_DIR}"
+        sed "s|__HOME__|${HOME}|g" "${TEAMGROK_TEMPLATE}" > "${TEAMGROK_PLIST}"
+        if launchctl load -w "${TEAMGROK_PLIST}"; then
+            success "LaunchAgent registered: ${TEAMGROK_LABEL}"
+        else
+            warn "Sidecar plist written but load failed: ${TEAMGROK_PLIST}"
+        fi
+    else
+        warn "Sidecar plist template missing — script copied, agent not registered"
+    fi
+else
+    warn "scripts/teamgrok-usage missing — Grok card needs the sidecar on :3458"
+fi
+
+# ── 6. summary ─────────────────────────────────
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo " Installation complete"

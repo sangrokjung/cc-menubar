@@ -1733,6 +1733,7 @@ final class StatusMenuDashboardView: NSView {
     private var usageView: UsageDashboardView?
     private var renderedAccountCount = -1
     private var renderedCodexPresent = false
+    private var renderedCodexAccountCount = -1
     private var renderedGrokPresent = false
     private var renderedUsageHeight: CGFloat = 0
     override var isFlipped: Bool { true }
@@ -1747,7 +1748,7 @@ final class StatusMenuDashboardView: NSView {
     }
 
     static func codexHeight(_ health: CodexHealth?) -> CGFloat {
-        health == nil ? 0 : CodexStatusView.preferredHeight
+        CodexStatusView.preferredHeight(for: health)
     }
 
     static func grokHeight(_ health: GrokHealth?) -> CGFloat {
@@ -1777,6 +1778,7 @@ final class StatusMenuDashboardView: NSView {
         subviews.removeAll()
         renderedAccountCount = teamClaude?.accounts.count ?? 0
         renderedCodexPresent = codex != nil
+        renderedCodexAccountCount = codex?.proxyAccounts.count ?? 0
         renderedGrokPresent = grok != nil
         renderedUsageHeight = UsageDashboardView.preferredHeight(for: usage)
         var y: CGFloat = 4
@@ -1809,12 +1811,13 @@ final class StatusMenuDashboardView: NSView {
         }
 
         if let codex = codex {
-            let view = CodexStatusView(frame: NSRect(x: 0, y: y, width: bounds.width, height: CodexStatusView.preferredHeight))
+            let height = CodexStatusView.preferredHeight(for: codex)
+            let view = CodexStatusView(frame: NSRect(x: 0, y: y, width: bounds.width, height: height))
             view.health = codex
             view.usage = usage
             addSubview(view)
             codexView = view
-            y += CodexStatusView.preferredHeight + 4
+            y += height + 4
         }
 
         if let grok = grok {
@@ -1849,6 +1852,7 @@ final class StatusMenuDashboardView: NSView {
         let usageHeight = UsageDashboardView.preferredHeight(for: usage)
         let structureChanged = accountCount != renderedAccountCount
             || (codex != nil) != renderedCodexPresent
+            || (codex?.proxyAccounts.count ?? 0) != renderedCodexAccountCount
             || (grok != nil) != renderedGrokPresent
             || usageHeight != renderedUsageHeight
         if structureChanged {
@@ -2123,129 +2127,89 @@ final class UsageDashboardView: NSView {
     }
 }
 
-final class MenuActionRowView: NSView {
-    static let preferredHeight: CGFloat = 46
-    let icon: String
-    let symbolName: String?
+struct MenuActionChip {
     let title: String
     let detail: String
     let tone: NSColor
-    var onClick: (() -> Void)?
-    private var hovered = false
-    override var isFlipped: Bool { true }
-    override var acceptsFirstResponder: Bool { true }
+    let onClick: () -> Void
+}
 
-    init(frame frameRect: NSRect, icon: String, symbolName: String? = nil, title: String, detail: String, tone: NSColor) {
-        self.icon = icon
-        self.symbolName = symbolName
-        self.title = title
-        self.detail = detail
-        self.tone = tone
+final class MenuActionBarView: NSView {
+    static let preferredHeight: CGFloat = 40
+    private let chips: [MenuActionChip]
+    private var chipRects: [NSRect] = []
+    private var hoveredIndex: Int?
+    override var isFlipped: Bool { true }
+
+    init(frame frameRect: NSRect, chips: [MenuActionChip]) {
+        self.chips = chips
         super.init(frame: frameRect)
         setAccessibilityElement(true)
-        setAccessibilityRole(.button)
-        setAccessibilityLabel(title)
-        setAccessibilityHelp(detail)
+        setAccessibilityRole(.group)
+        setAccessibilityLabel("작업")
+        setAccessibilityHelp(chips.map { "\($0.title): \($0.detail)" }.joined(separator: ", "))
     }
 
     required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
+        fatalError("init(coder:) not implemented")
     }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         trackingAreas.forEach { removeTrackingArea($0) }
-        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways], owner: self, userInfo: nil))
+        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways], owner: self, userInfo: nil))
     }
 
-    override func mouseEntered(with event: NSEvent) {
-        hovered = true
-        needsDisplay = true
+    override func mouseMoved(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        let index = chipRects.firstIndex { $0.contains(point) }
+        if index != hoveredIndex {
+            hoveredIndex = index
+            needsDisplay = true
+        }
     }
 
     override func mouseExited(with event: NSEvent) {
-        hovered = false
+        hoveredIndex = nil
         needsDisplay = true
     }
 
     override func mouseDown(with event: NSEvent) {
-        onClick?()
-    }
-
-    override func keyDown(with event: NSEvent) {
-        if event.keyCode == 36 || event.keyCode == 49 {
-            onClick?()
-        } else {
-            super.keyDown(with: event)
+        let point = convert(event.locationInWindow, from: nil)
+        if let index = chipRects.firstIndex(where: { $0.contains(point) }) {
+            chips[index].onClick()
         }
-    }
-
-    override func accessibilityPerformPress() -> Bool {
-        onClick?()
-        return true
     }
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        let bg = hovered
-            ? NSColor(calibratedRed: 0.13, green: 0.16, blue: 0.21, alpha: 1.0)
-            : NSColor(calibratedRed: 0.075, green: 0.09, blue: 0.12, alpha: 0.98)
-        let line = hovered ? tone.withAlphaComponent(0.42) : NSColor(calibratedRed: 0.23, green: 0.27, blue: 0.34, alpha: 0.90)
-        let text = NSColor(calibratedRed: 0.92, green: 0.95, blue: 0.98, alpha: 1.0)
+        chipRects.removeAll(keepingCapacity: true)
+        let inset = bounds.insetBy(dx: 8, dy: 4)
+        let gap: CGFloat = 6
+        let count = CGFloat(max(chips.count, 1))
+        let width = (inset.width - gap * (count - 1)) / count
+        let titleFont = NSFont.systemFont(ofSize: 11.5, weight: .semibold)
         let muted = NSColor(calibratedRed: 0.55, green: 0.61, blue: 0.70, alpha: 1.0)
-        let card = bounds.insetBy(dx: 8, dy: 4)
 
-        bg.setFill()
-        NSBezierPath(roundedRect: card, xRadius: 8, yRadius: 8).fill()
-        line.setStroke()
-        let path = NSBezierPath(roundedRect: card, xRadius: 8, yRadius: 8)
-        path.lineWidth = 1
-        path.stroke()
+        for (i, chip) in chips.enumerated() {
+            let rect = NSRect(x: inset.minX + CGFloat(i) * (width + gap), y: inset.minY, width: width, height: inset.height)
+            chipRects.append(rect)
+            let hovered = hoveredIndex == i
+            let fill = hovered
+                ? chip.tone.withAlphaComponent(0.22)
+                : NSColor(calibratedRed: 0.075, green: 0.09, blue: 0.12, alpha: 0.98)
+            fill.setFill()
+            NSBezierPath(roundedRect: rect, xRadius: 8, yRadius: 8).fill()
+            (hovered ? chip.tone.withAlphaComponent(0.55) : NSColor(calibratedRed: 0.23, green: 0.27, blue: 0.34, alpha: 0.90)).setStroke()
+            let path = NSBezierPath(roundedRect: rect, xRadius: 8, yRadius: 8)
+            path.lineWidth = 1
+            path.stroke()
 
-        let iconRect = NSRect(x: card.minX + 12, y: card.minY + 6, width: 28, height: 28)
-        tone.withAlphaComponent(0.16).setFill()
-        NSBezierPath(roundedRect: iconRect, xRadius: 7, yRadius: 7).fill()
-        tone.withAlphaComponent(0.30).setStroke()
-        let iconPath = NSBezierPath(roundedRect: iconRect, xRadius: 7, yRadius: 7)
-        iconPath.lineWidth = 1
-        iconPath.stroke()
-
-        if #available(macOS 11.0, *),
-           let symbolName = symbolName,
-           let baseImage = NSImage(systemSymbolName: symbolName, accessibilityDescription: title) {
-            let config = NSImage.SymbolConfiguration(pointSize: 15, weight: .semibold)
-            let image = baseImage.withSymbolConfiguration(config) ?? baseImage
-            let drawRect = iconRect.insetBy(dx: 6, dy: 6)
-            image.draw(in: drawRect, from: .zero, operation: .sourceOver, fraction: 1.0)
-            if let context = NSGraphicsContext.current {
-                let previousOperation = context.compositingOperation
-                context.compositingOperation = .sourceAtop
-                tone.setFill()
-                NSBezierPath(rect: drawRect).fill()
-                context.compositingOperation = previousOperation
-            }
-        } else {
-            let iconAttrs: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: 16, weight: .semibold),
-                .foregroundColor: tone,
-            ]
-            let iconSize = icon.size(withAttributes: iconAttrs)
-            icon.draw(
-                at: NSPoint(x: iconRect.midX - iconSize.width / 2, y: iconRect.midY - iconSize.height / 2 - 0.5),
-                withAttributes: iconAttrs
-            )
+            let label = chip.title
+            let attrs: [NSAttributedString.Key: Any] = [.font: titleFont, .foregroundColor: hovered ? chip.tone : muted]
+            let size = label.size(withAttributes: attrs)
+            label.draw(at: NSPoint(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2), withAttributes: attrs)
         }
-
-        title.draw(at: NSPoint(x: card.minX + 54, y: card.minY + 11), withAttributes: [
-            .font: NSFont.systemFont(ofSize: 15, weight: .semibold),
-            .foregroundColor: text,
-        ])
-        let detailAttrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 12, weight: .medium),
-            .foregroundColor: muted,
-        ]
-        let size = detail.size(withAttributes: detailAttrs)
-        detail.draw(at: NSPoint(x: card.maxX - size.width - 14, y: card.minY + 13), withAttributes: detailAttrs)
     }
 }
 
@@ -3283,7 +3247,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let screenHeight = statusItem?.button?.window?.screen?.visibleFrame.height
             ?? NSScreen.main?.visibleFrame.height
             ?? 900
-        let actionAreaHeight = CGFloat(7) * MenuActionRowView.preferredHeight + 72
+        let actionAreaHeight = MenuActionBarView.preferredHeight + 16
         let screenLimitedHeight = max(320, screenHeight - actionAreaHeight)
         let dashboardHeight = min(dashboardContentHeight, min(StatusMenuDashboardView.maxMenuDashboardHeight, screenLimitedHeight))
         let dashboard = StatusMenuDashboardView(frame: NSRect(x: 0, y: 0, width: StatusMenuDashboardView.preferredWidth, height: dashboardContentHeight))
@@ -3321,87 +3285,52 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let blue = NSColor(calibratedRed: 0.28, green: 0.55, blue: 0.90, alpha: 1.0)
         let yellow = NSColor(calibratedRed: 0.93, green: 0.76, blue: 0.22, alpha: 1.0)
         let red = NSColor(calibratedRed: 0.96, green: 0.26, blue: 0.32, alpha: 1.0)
-
-        let refreshItem = NSMenuItem(title: "새로고침", action: #selector(refreshAction), keyEquivalent: "r")
-        refreshItem.target = self
-        let refreshDetail = isFetchingUsageQuick ? "오늘 사용량 갱신 중" : (isFetching ? "전체 사용량 갱신 중" : (isRefreshingStatus ? "상태 갱신 중" : "즉시 갱신"))
-        let refreshView = MenuActionRowView(frame: NSRect(x: 0, y: 0, width: actionWidth, height: MenuActionRowView.preferredHeight), icon: "↻", symbolName: "arrow.clockwise", title: "새로고침", detail: refreshDetail, tone: green)
-        refreshView.onClick = { [weak self, weak menu] in
-            self?.refreshAction()
-            menu?.cancelTracking()
-        }
-        refreshItem.view = refreshView
-        menu.addItem(refreshItem)
-
         let unmeasuredCount = currentTeamClaude?.measurementPendingCount ?? 0
-        let measurementUnavailableCount = currentTeamClaude?.measurementUnavailableCount ?? 0
-        let quotaLimitedCount = currentTeamClaude?.quotaLimitedCount ?? 0
-        let measureDetail = isMeasuringTeamClaude
-            ? (teamClaudeMeasureDetail ?? "진행 중")
-            : (teamClaudeMeasureDetail
-                ?? (unmeasuredCount > 0
-                    ? "\(unmeasuredCount)개 지금 측정 가능"
-                    : (measurementUnavailableCount > 0
-                        ? "\(measurementUnavailableCount)개 상태 확인 필요"
-                        : (quotaLimitedCount > 0 ? "측정 완료 · \(quotaLimitedCount)개 라우팅 한도 대기" : "모든 계정 측정 완료"))))
-        let measureItem = NSMenuItem(title: "TeamClaude 계정 측정", action: #selector(measureTeamClaudeAction), keyEquivalent: "")
-        measureItem.target = self
-        let measureView = MenuActionRowView(frame: NSRect(x: 0, y: 0, width: actionWidth, height: MenuActionRowView.preferredHeight), icon: "◎", symbolName: "gauge", title: "TeamClaude 계정 측정", detail: measureDetail, tone: yellow)
-        measureView.onClick = { [weak self, weak menu] in
-            self?.measureTeamClaudeAction()
-            menu?.cancelTracking()
-        }
-        measureItem.view = measureView
-        menu.addItem(measureItem)
+        let measureTitle = isMeasuringTeamClaude ? "측정중" : (unmeasuredCount > 0 ? "측정 \(unmeasuredCount)" : "측정")
+        let barItem = NSMenuItem()
+        let barView = MenuActionBarView(
+            frame: NSRect(x: 0, y: 0, width: actionWidth, height: MenuActionBarView.preferredHeight),
+            chips: [
+                MenuActionChip(title: "새로고침", detail: "즉시 갱신", tone: green, onClick: { [weak self, weak menu] in
+                    self?.refreshAction()
+                    menu?.cancelTracking()
+                }),
+                MenuActionChip(title: measureTitle, detail: "TeamClaude 계정 측정", tone: yellow, onClick: { [weak self, weak menu] in
+                    self?.measureTeamClaudeAction()
+                    menu?.cancelTracking()
+                }),
+                MenuActionChip(title: "가져오기", detail: "Claude Code 계정 가져오기", tone: green, onClick: { [weak self, weak menu] in
+                    self?.importClaudeCodeAccountAction()
+                    menu?.cancelTracking()
+                }),
+                MenuActionChip(title: "계정추가", detail: "Claude OAuth 계정 추가", tone: blue, onClick: { [weak self, weak menu] in
+                    self?.addClaudeOAuthAccountAction()
+                    menu?.cancelTracking()
+                }),
+                MenuActionChip(title: "재시작", detail: "TeamClaude 서버 재시작", tone: blue, onClick: { [weak self, weak menu] in
+                    self?.restartTeamClaudeAction()
+                    menu?.cancelTracking()
+                }),
+                MenuActionChip(title: "시각화", detail: "cc-visualizer 열기", tone: blue, onClick: { [weak self, weak menu] in
+                    self?.openCCVisualizer()
+                    menu?.cancelTracking()
+                }),
+                MenuActionChip(title: "종료", detail: "⌘Q", tone: red, onClick: { [weak self] in
+                    self?.quitAction()
+                }),
+            ]
+        )
+        barItem.view = barView
+        menu.addItem(barItem)
 
-        let importItem = NSMenuItem(title: "Claude Code 계정 가져오기", action: #selector(importClaudeCodeAccountAction), keyEquivalent: "")
-        importItem.target = self
-        let importView = MenuActionRowView(frame: NSRect(x: 0, y: 0, width: actionWidth, height: MenuActionRowView.preferredHeight), icon: "↓", symbolName: "square.and.arrow.down", title: "Claude Code 계정 가져오기", detail: "현재 로그인", tone: green)
-        importView.onClick = { [weak self, weak menu] in
-            self?.importClaudeCodeAccountAction()
-            menu?.cancelTracking()
-        }
-        importItem.view = importView
-        menu.addItem(importItem)
-
-        let loginItem = NSMenuItem(title: "Claude OAuth 계정 추가", action: #selector(addClaudeOAuthAccountAction), keyEquivalent: "")
-        loginItem.target = self
-        let loginView = MenuActionRowView(frame: NSRect(x: 0, y: 0, width: actionWidth, height: MenuActionRowView.preferredHeight), icon: "+", symbolName: "person.crop.circle.badge.plus", title: "Claude OAuth 계정 추가", detail: "브라우저", tone: blue)
-        loginView.onClick = { [weak self, weak menu] in
-            self?.addClaudeOAuthAccountAction()
-            menu?.cancelTracking()
-        }
-        loginItem.view = loginView
-        menu.addItem(loginItem)
-
-        let restartTeamClaudeItem = NSMenuItem(title: "TeamClaude 서버 재시작", action: #selector(restartTeamClaudeAction), keyEquivalent: "")
-        restartTeamClaudeItem.target = self
-        let restartTeamClaudeView = MenuActionRowView(frame: NSRect(x: 0, y: 0, width: actionWidth, height: MenuActionRowView.preferredHeight), icon: "⟳", symbolName: "arrow.triangle.2.circlepath", title: "TeamClaude 서버 재시작", detail: "계정 반영 · 진행 중 응답 끊김", tone: blue)
-        restartTeamClaudeView.onClick = { [weak self, weak menu] in
-            self?.restartTeamClaudeAction()
-            menu?.cancelTracking()
-        }
-        restartTeamClaudeItem.view = restartTeamClaudeView
-        menu.addItem(restartTeamClaudeItem)
-
-        let openItem = NSMenuItem(title: "cc-visualizer 열기", action: #selector(openCCVisualizer), keyEquivalent: "")
-        openItem.target = self
-        let openView = MenuActionRowView(frame: NSRect(x: 0, y: 0, width: actionWidth, height: MenuActionRowView.preferredHeight), icon: "▣", symbolName: "chart.bar.xaxis", title: "cc-visualizer 열기", detail: "앱 열기", tone: blue)
-        openView.onClick = { [weak self, weak menu] in
-            self?.openCCVisualizer()
-            menu?.cancelTracking()
-        }
-        openItem.view = openView
-        menu.addItem(openItem)
-
-        let quitItem = NSMenuItem(title: "종료", action: #selector(quitAction), keyEquivalent: "q")
-        quitItem.target = self
-        let quitView = MenuActionRowView(frame: NSRect(x: 0, y: 0, width: actionWidth, height: MenuActionRowView.preferredHeight), icon: "×", symbolName: "power", title: "종료", detail: "⌘Q", tone: red)
-        quitView.onClick = { [weak self] in
-            self?.quitAction()
-        }
-        quitItem.view = quitView
-        menu.addItem(quitItem)
+        let refreshKey = NSMenuItem(title: "새로고침", action: #selector(refreshAction), keyEquivalent: "r")
+        refreshKey.target = self
+        refreshKey.isHidden = true
+        menu.addItem(refreshKey)
+        let quitKey = NSMenuItem(title: "종료", action: #selector(quitAction), keyEquivalent: "q")
+        quitKey.target = self
+        quitKey.isHidden = true
+        menu.addItem(quitKey)
 
         // 메뉴가 열린 직후 서버 원본을 다시 읽고 위 dashboard를 실시간 갱신한다.
         loadFastStatusInBackground()

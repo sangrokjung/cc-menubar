@@ -1,7 +1,14 @@
 import Cocoa
 
 final class CodexStatusView: NSView {
-    static let preferredHeight: CGFloat = 406
+    static func preferredHeight(for health: CodexHealth?) -> CGFloat {
+        guard let health else { return 0 }
+        let accountBlock: CGFloat = health.proxyAccounts.isEmpty ? 0 : 34 + CGFloat(health.proxyAccounts.count) * 24
+        let profileRows = max(1, min(2, health.profiles.count))
+        let profileBlock: CGFloat = 34 + CGFloat(profileRows) * 24
+        return 12 + 48 + 64 + accountBlock + 8 + profileBlock + 8 + 28 + 22
+    }
+
     var health: CodexHealth? {
         didSet {
             setAccessibilityLabel(health?.accessibilitySummary ?? "Codex 상태")
@@ -135,7 +142,48 @@ final class CodexStatusView: NSView {
         let monthlyDetail = codexMonthlyCost > 0 ? formatKRWShort(codexMonthlyCost, rate: usage?.usdKrwRate ?? 1450) : formatCodexTokens(codexMonthlyTokens)
         metric("월 환산비용", codexMonthlyCost > 0 ? formatCost(codexMonthlyCost) : "-", monthlyDetail, x: innerX + (statW + gap) * 3, y: statY, width: statW, color: blue)
 
-        let tableY = statY + 70
+        var tableY = statY + 70
+        if !health.proxyAccounts.isEmpty {
+            fillRound(NSRect(x: innerX, y: tableY, width: card.width - 32, height: 28), panel2, 8)
+            drawText("계정", innerX + 12, tableY + 7, headFont, muted)
+            drawText("5시간", innerX + 280, tableY + 7, headFont, muted)
+            drawText("7일", innerX + 520, tableY + 7, headFont, muted)
+            drawText("리셋", innerX + 730, tableY + 7, headFont, muted)
+            for (i, row) in health.proxyAccounts.enumerated() {
+                let y = tableY + 34 + CGFloat(i) * 24
+                if i % 2 == 1 {
+                    fillRound(NSRect(x: innerX, y: y - 1, width: card.width - 32, height: 23), NSColor.white.withAlphaComponent(0.035), 7)
+                }
+                let sessionColor = limitTone(row.sessionPercent)
+                let weeklyColor = limitTone(row.weeklyPercent)
+                fillRound(NSRect(x: innerX + 10, y: y + 7, width: 8, height: 8), row.enabled ? sessionColor : muted, 4)
+                drawText(row.name, innerX + 24, y + 2, rowFont, text)
+                drawText(row.sessionPercent.map { formatCodexPercent($0) } ?? "측정 전", innerX + 280, y + 2, rowFont, row.sessionPercent == nil ? dim : sessionColor)
+                if let percent = row.sessionPercent {
+                    let track = NSRect(x: innerX + 348, y: y + 8, width: 90, height: 5)
+                    fillRound(track, NSColor.white.withAlphaComponent(0.10), 2)
+                    let fillWidth = track.width * CGFloat(max(0, min(100, percent)) / 100)
+                    if fillWidth > 0 {
+                        fillRound(NSRect(x: track.minX, y: track.minY, width: max(2, fillWidth), height: track.height), sessionColor, 2)
+                    }
+                }
+                drawText(row.weeklyPercent.map { formatCodexPercent($0) } ?? "측정 전", innerX + 520, y + 2, rowFont, row.weeklyPercent == nil ? dim : weeklyColor)
+                if let percent = row.weeklyPercent {
+                    let track = NSRect(x: innerX + 580, y: y + 8, width: 90, height: 5)
+                    fillRound(track, NSColor.white.withAlphaComponent(0.10), 2)
+                    let fillWidth = track.width * CGFloat(max(0, min(100, percent)) / 100)
+                    if fillWidth > 0 {
+                        fillRound(NSRect(x: track.minX, y: track.minY, width: max(2, fillWidth), height: track.height), weeklyColor, 2)
+                    }
+                }
+                let resetText = row.sessionPercent != nil
+                    ? "5h \(formatCodexReset(row.sessionResetAt))"
+                    : (row.weeklyPercent != nil ? "7d \(formatCodexReset(row.weeklyResetAt))" : "—")
+                drawText(resetText, innerX + 730, y + 2, smallFont, muted)
+            }
+            tableY += 34 + CGFloat(health.proxyAccounts.count) * 24 + 8
+        }
+
         fillRound(NSRect(x: innerX, y: tableY, width: card.width - 32, height: 28), panel2, 8)
         drawText("모델", innerX + 12, tableY + 7, headFont, muted)
         drawText("호출", innerX + 250, tableY + 7, headFont, muted)
@@ -144,7 +192,7 @@ final class CodexStatusView: NSView {
         drawText("상태", innerX + 585, tableY + 7, headFont, muted)
         drawText("최근", innerX + 730, tableY + 7, headFont, muted)
 
-        let rows = Array(health.profiles.prefix(3))
+        let rows = Array(health.profiles.prefix(2))
         if rows.isEmpty {
             drawText("Codex 세션 사용 기록 없음", innerX + 12, tableY + 42, rowFont, dim)
         } else {
@@ -166,36 +214,14 @@ final class CodexStatusView: NSView {
             }
         }
 
-        let recommendationY = tableY + 112
-        let recommendationRect = NSRect(x: innerX, y: recommendationY, width: card.width - 32, height: 96)
-        fillRound(recommendationRect, panel2, 8)
-        strokeRound(recommendationRect, line.withAlphaComponent(0.8), 8)
-        drawText("GPT-5.6 작업 추천", recommendationRect.minX + 12, recommendationRect.minY + 9, subFont, text)
-        let currentModel = "현재 \(modelLabel)\(effort == "-" ? "" : " · \(effort)")"
-        drawRight(currentModel, recommendationRect.maxX - 12, recommendationRect.minY + 9, smallFont, blue)
+        let recY = tableY + 34 + CGFloat(max(rows.count, 1)) * 24 + 8
+        let recText = codexModelRecommendations.map { "\($0.task) \($0.model)" }.joined(separator: "  ·  ")
+        drawText(recText, innerX, recY, smallFont, dim)
+        drawRight("현재 \(modelLabel)\(effort == "-" ? "" : " · \(effort)")", card.maxX - 16, recY, smallFont, blue)
 
-        let columnY = recommendationRect.minY + 36
-        let columnWidth = recommendationRect.width / CGFloat(codexModelRecommendations.count)
-        let recommendationColors = [green, red, blue, yellow]
-        for (index, recommendation) in codexModelRecommendations.enumerated() {
-            let x = recommendationRect.minX + CGFloat(index) * columnWidth
-            if index > 0 {
-                line.withAlphaComponent(0.65).setStroke()
-                let divider = NSBezierPath()
-                divider.move(to: NSPoint(x: x, y: columnY - 4))
-                divider.line(to: NSPoint(x: x, y: recommendationRect.maxY - 10))
-                divider.lineWidth = 1
-                divider.stroke()
-            }
-            let color = recommendationColors[index]
-            drawText(recommendation.task, x + 12, columnY, headFont, muted)
-            drawText(recommendation.model, x + 12, columnY + 20, rowFont, color)
-            drawText(recommendation.effort, x + 12, columnY + 39, smallFont, dim)
-        }
-
-        let footerY = card.maxY - 30
+        let footerY = card.maxY - 24
         let hint = health.hints.first ?? "프롬프트: 목표 · 성공 기준 · 권한 · 검증만 명확하게"
         drawText(hint, innerX, footerY, smallFont, health.hints.isEmpty ? dim : tone)
-        drawRight("files \(health.scannedLogFiles) · tok \(formatCodexTokens(health.totalTokens)) · 7d reset \(formatCodexReset(health.secondaryResetAt))", card.maxX - 16, footerY, smallFont, dim)
+        drawRight("tok \(formatCodexTokens(health.totalTokens)) · 7d \(formatCodexReset(health.secondaryResetAt))", card.maxX - 16, footerY, smallFont, dim)
     }
 }

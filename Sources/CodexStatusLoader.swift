@@ -596,14 +596,46 @@ func codexProxyAccountIsBlocked(_ account: [String: Any], threshold: Double, now
     return sessionUsed >= threshold || weeklyUsed >= threshold
 }
 
+func codexProxyAccountRow(_ account: [String: Any], nowMs: Int64) -> CodexProxyAccount {
+    let quota = tcDict(account["quota"])
+    let sessionResetMs = parseTeamClaudeTimeMs(quota?["unified5hReset"])
+    let weeklyResetMs = parseTeamClaudeTimeMs(quota?["unified7dReset"])
+    let session = teamClaudeCurrentQuotaUtilization(
+        tcDouble(quota?["unified5h"]),
+        resetAtMs: sessionResetMs,
+        nowMs: nowMs
+    ).map { $0 * 100 }
+    let weekly = teamClaudeCurrentQuotaUtilization(
+        tcDouble(quota?["unified7d"]),
+        resetAtMs: weeklyResetMs,
+        nowMs: nowMs
+    ).map { $0 * 100 }
+    func date(_ ms: Int64?) -> Date? {
+        guard let ms else { return nil }
+        return Date(timeIntervalSince1970: Double(ms) / 1000)
+    }
+    return CodexProxyAccount(
+        name: tcString(account["name"]) ?? "-",
+        enabled: tcBool(account["enabled"]) ?? true,
+        status: tcString(account["status"]) ?? "",
+        sessionPercent: session,
+        weeklyPercent: weekly,
+        sessionResetAt: date(sessionResetMs),
+        weeklyResetAt: date(weeklyResetMs)
+    )
+}
+
 func loadCodexHealth() -> CodexHealth {
     var proxyState = CodexProxyState.notConfigured
     var proxyHint: String?
+    var proxyAccounts: [CodexProxyAccount] = []
     if let port = teamCodexServerPort() {
         if let proxyStatus = fetchTeamClaudeStatus(port: port) {
             let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
             let threshold = tcDouble(proxyStatus["switchThreshold"]) ?? 0.995
-            let eligible = (tcArray(proxyStatus["accounts"]) ?? []).filter {
+            let rawAccounts = tcArray(proxyStatus["accounts"]) ?? []
+            proxyAccounts = rawAccounts.map { codexProxyAccountRow($0, nowMs: nowMs) }
+            let eligible = rawAccounts.filter {
                 tcBool($0["enabled"]) != false && tcString($0["status"]) != "error"
             }
             if eligible.isEmpty {
@@ -672,8 +704,23 @@ func loadCodexHealth() -> CodexHealth {
     if stats.errorEvents > 0 {
         hints.append("최근 7일 오류 이벤트 \(stats.errorEvents)회")
     }
-    if max(stats.primaryUsedPercent ?? 0, stats.secondaryUsedPercent ?? 0) >= 90 {
-        hints.append("Codex 제한 높음 \(formatCodexLimitPair(stats.primaryUsedPercent, stats.secondaryUsedPercent) ?? "-")")
+    var primaryUsedPercent = stats.primaryUsedPercent
+    var secondaryUsedPercent = stats.secondaryUsedPercent
+    var primaryResetAt = stats.primaryResetAt
+    var secondaryResetAt = stats.secondaryResetAt
+    if proxyState == .ok, let row = proxyAccounts.first {
+        if let session = row.sessionPercent {
+            primaryUsedPercent = session
+            primaryResetAt = row.sessionResetAt
+        }
+        if let weekly = row.weeklyPercent {
+            secondaryUsedPercent = weekly
+            secondaryResetAt = row.weeklyResetAt
+        }
+    }
+
+    if max(primaryUsedPercent ?? 0, secondaryUsedPercent ?? 0) >= 90 {
+        hints.append("Codex 제한 높음 \(formatCodexLimitPair(primaryUsedPercent, secondaryUsedPercent) ?? "-")")
     }
     if let proxyHint = proxyHint {
         hints.insert(proxyHint, at: 0)
@@ -682,7 +729,7 @@ func loadCodexHealth() -> CodexHealth {
     var status: String
     if authMalformed {
         status = "error"
-    } else if !authFileExists || (!hasApiKey && !hasTokens) || staleRefresh || stats.quotaEvents > 0 || stats.errorEvents > 0 || max(stats.primaryUsedPercent ?? 0, stats.secondaryUsedPercent ?? 0) >= 90 {
+    } else if !authFileExists || (!hasApiKey && !hasTokens) || staleRefresh || stats.quotaEvents > 0 || stats.errorEvents > 0 || max(primaryUsedPercent ?? 0, secondaryUsedPercent ?? 0) >= 90 {
         status = "warning"
     } else {
         status = "ok"
@@ -720,13 +767,14 @@ func loadCodexHealth() -> CodexHealth {
         errorEvents: stats.errorEvents,
         lastCallAt: stats.lastCallAt,
         planType: stats.planType,
-        primaryUsedPercent: stats.primaryUsedPercent,
-        secondaryUsedPercent: stats.secondaryUsedPercent,
-        primaryResetAt: stats.primaryResetAt,
-        secondaryResetAt: stats.secondaryResetAt,
+        primaryUsedPercent: primaryUsedPercent,
+        secondaryUsedPercent: secondaryUsedPercent,
+        primaryResetAt: primaryResetAt,
+        secondaryResetAt: secondaryResetAt,
         scannedLogFiles: stats.scannedLogFiles,
         scannedLogBytes: stats.scannedLogBytes,
         profiles: stats.profiles,
+        proxyAccounts: proxyAccounts,
         hints: hints,
         proxyState: proxyState
     )
