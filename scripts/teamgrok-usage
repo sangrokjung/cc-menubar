@@ -16,9 +16,9 @@
 //   ~/.grok/logs/unified.jsonl
 //       "billing: fetched credits config" 줄 — 구독 티어와 주간 청구 창(start/end).
 //
-// 일부러 안 하는 것: 쿼터 퍼센트. xAI 는 한도(분모)를 어디에도 노출하지 않는다 —
-// 사용량은 알 수 있어도 "몇 % 남았는지"는 정직하게 만들 수 없다. quota.unified5h/7d 는
-// null 로 두고(메뉴바에서 '모름'으로 렌더), unified7dReset 만 실제 청구 창 종료로 채운다.
+// 주간 풀 사용률: billing config.creditUsagePercent.
+// 실측 SuperGrok Heavy 가 1.0 → 2.0 → 3.0 으로 올라간다 = 0–100 퍼센트(0–1 이면 1을 넘을 수 없다).
+// 분모 토큰 수는 여전히 없다. 남은 % = 100 - used 만 계산한다. 5시간 창은 없다(주간 풀 하나).
 //
 // 재시작: launchctl kickstart -k gui/$UID/com.westwave.teamgrok (읽기 전용이라 언제 죽여도 안전 —
 // teamclaude 와 달리 in-flight 스트림을 들고 있지 않다).
@@ -228,7 +228,14 @@ async function readBilling() {
     onDemandCap: cfg.onDemandCap?.val ?? null,
     onDemandUsed: cfg.onDemandUsed?.val ?? null,
     prepaidBalance: cfg.prepaidBalance?.val ?? null,
+    creditUsagePercent: normalizeCreditPercent(cfg.creditUsagePercent),
   };
+}
+
+function normalizeCreditPercent(raw) {
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) return null;
+  return Math.max(0, Math.min(100, n));
 }
 
 // 이메일만 뽑는다. key/refresh_token 은 절대 읽어서 보관하지 않는다 —
@@ -304,6 +311,9 @@ function aggregate(turns, billing, now) {
 // ── /teamclaude/status 응답 ──────────────────────────────────────────────────
 function buildSnapshot({ agg, billing, accountLabel, scan, now }) {
   const lastTurn = state.turns.length ? state.turns[state.turns.length - 1].t : null;
+  const used = billing?.creditUsagePercent ?? null;
+  const remaining = used == null ? null : Math.max(0, Math.round((100 - used) * 10) / 10);
+  const quotaAvailable = used != null;
 
   return {
     provider: 'grok',
@@ -320,17 +330,12 @@ function buildSnapshot({ agg, billing, accountLabel, scan, now }) {
       inflight: 0,
       maxConcurrent: 1,
       quota: {
-        // xAI 는 한도를 노출하지 않는다 → 퍼센트는 만들 수 없다. null = 모름.
-        // (메뉴바의 teamClaudeCurrentQuotaUtilization 은 nil 을 0 으로 취급하므로
-        //  '차단됨'으로 잘못 뜨지 않는다.)
         unified5h: null,
         unified5hReset: null,
-        unified7d: null,
-        // 이것만 실제 값이다 — 청구 창 종료 시각. 숫자(epoch ms)로 준다:
-        // 메뉴바의 parseTeamClaudeTimeMs 는 숫자를 그대로 받지만 문자열은
-        // ISO 포맷터를 타는데 xAI 는 6자리 소수를 쓴다(파싱 불안정).
+        // creditUsagePercent 는 0–100. teamclaude 계약 unified7d 는 0–1.
+        unified7d: used == null ? null : used / 100,
         unified7dReset: billing?.period?.endMs ?? null,
-        unifiedStatus: 'unmeasured',
+        unifiedStatus: quotaAvailable ? 'measured' : 'unmeasured',
       },
       usage: {
         totalRequests: agg.total.modelCalls,
@@ -347,6 +352,8 @@ function buildSnapshot({ agg, billing, accountLabel, scan, now }) {
       onDemandCap: billing?.onDemandCap ?? null,
       onDemandUsed: billing?.onDemandUsed ?? null,
       prepaidBalance: billing?.prepaidBalance ?? null,
+      creditUsagePercent: used,
+      creditRemainingPercent: remaining,
       billingObservedAt: billing?.observedAt ?? null,
       today: agg.today,
       week: agg.week,
@@ -354,8 +361,10 @@ function buildSnapshot({ agg, billing, accountLabel, scan, now }) {
       byModel: agg.byModel,
       // 한도가 없다는 사실 자체를 응답에 박아둔다. 나중에 이 값을 읽는 쪽이
       // 퍼센트를 지어내지 않도록.
-      quotaAvailable: false,
-      quotaNote: 'xAI exposes no limit/denominator; spend and tokens only.',
+      quotaAvailable,
+      quotaNote: quotaAvailable
+        ? 'weekly pool remaining from billing creditUsagePercent'
+        : 'xAI billing line has no creditUsagePercent yet',
       sessions: scan.files,
       lastScanAt: now,
       lastScanError,

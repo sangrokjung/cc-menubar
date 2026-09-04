@@ -56,7 +56,8 @@ func loadGrokHealth() -> GrokHealth? {
             account: nil, subscriptionTier: nil,
             periodType: nil, periodStart: nil, periodEnd: nil,
             today: GrokUsageAgg(), week: GrokUsageAgg(), total: GrokUsageAgg(), models: [],
-            sessions: 0, lastUsedAt: nil, scanError: nil, quotaAvailable: false
+            sessions: 0, lastUsedAt: nil, scanError: nil,
+            creditUsedPercent: nil, creditRemainingPercent: nil, quotaAvailable: false
         )
     }
 
@@ -82,6 +83,9 @@ func loadGrokHealth() -> GrokHealth? {
 
     let scanError = tcString(grok?["lastScanError"])
     let state: GrokServiceState = total.turns == 0 ? .noData : .ok
+    let used = tcDouble(grok?["creditUsagePercent"])
+    let remaining = tcDouble(grok?["creditRemainingPercent"]) ?? used.map { max(0, 100 - $0) }
+    let quotaAvailable = (tcBool(grok?["quotaAvailable"]) ?? false) || used != nil
 
     return GrokHealth(
         checkedAt: now,
@@ -99,6 +103,8 @@ func loadGrokHealth() -> GrokHealth? {
         sessions: tcInt(grok?["sessions"]) ?? 0,
         lastUsedAt: lastUsed,
         scanError: scanError,
-        quotaAvailable: tcBool(grok?["quotaAvailable"]) ?? false
+        creditUsedPercent: used,
+        creditRemainingPercent: remaining,
+        quotaAvailable: quotaAvailable
     )
 }

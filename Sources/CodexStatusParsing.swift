@@ -172,6 +172,11 @@ func formatCodexPercent(_ value: Double?) -> String {
     return "\(Int(value.rounded()))%"
 }
 
+func remainingQuotaPercent(_ used: Double?) -> Double? {
+    guard let used, used.isFinite else { return nil }
+    return max(0, 100 - used)
+}
+
 func formatCodexLimitPair(_ primary: Double?, _ secondary: Double?) -> String? {
     guard primary != nil || secondary != nil else { return nil }
     return "\(formatCodexPercent(primary))/\(formatCodexPercent(secondary))"

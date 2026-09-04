@@ -2,14 +2,8 @@ import Foundation
 
 // Grok 사용량 모델.
 //
-// Codex 와 결정적으로 다른 점: xAI 는 한도(분모)를 어디에도 노출하지 않는다.
-// 응답 헤더에 x-ratelimit-* 이 없고(바이너리 strings -a 에 0건), 사용량 조회 API 도 없다.
-// 그래서 "5시간 87%" 같은 표시는 Grok 에 대해 정직하게 만들 수 없다 — 쓴 양(토큰·비용)과
-// 청구 창 리셋 시각만 실측 가능하다. 퍼센트 자리는 비워 두고 그 사실을 화면에 적는다.
-//
-// 데이터는 teamgrok-usage 사이드카(:3458)가 ~/.grok 의 세션 로그를 훑어 만든 것을
-// /teamclaude/status 로 받아온다. 메뉴바는 HTTP GET 한 번만 하므로 10초 statusTimer 에
-// 올려도 안전하다 (JSONL 파싱은 사이드카가 자기 주기로 한다).
+// 5시간 창은 없다. 유료 플랜은 주간 풀 하나(creditUsagePercent, 0–100).
+// 남은 % = 100 - used. 토큰 분모는 여전히 없다.
 
 enum GrokServiceState: Equatable {
     case notInstalled   // 사이드카 미설치 — Grok 섹션 자체를 숨긴다
@@ -59,12 +53,15 @@ struct GrokHealth: Equatable {
     let lastUsedAt: Date?
     let scanError: String?
 
-    /// 사이드카가 "한도를 알 수 없다"고 명시했는지. 나중에 xAI 가 한도를 열어주면
-    /// 사이드카만 고치면 되고 여기는 그대로 둔다.
+    /// billing creditUsagePercent (0–100). nil = 아직 못 읽음.
+    let creditUsedPercent: Double?
+    let creditRemainingPercent: Double?
     let quotaAvailable: Bool
 
     var isError: Bool { serviceState == .unreachable || scanError != nil }
-    var isWarning: Bool { serviceState == .noData }
+    var isWarning: Bool {
+        serviceState == .noData || (creditUsedPercent ?? 0) >= 70
+    }
 
     var statusLabel: String {
         switch serviceState {
@@ -83,7 +80,7 @@ struct GrokHealth: Equatable {
             return "Grok 세션 사용 기록 없음 — grok 을 한 번 쓰면 집계된다"
         default:
             if let scanError = scanError { return "사이드카 스캔 오류: \(scanError)" }
-            if !quotaAvailable { return "xAI 는 한도를 공개하지 않는다 — 잔여량이 아니라 사용량만 표시" }
+            if !quotaAvailable { return "주간 풀 % 를 아직 못 읽음 — grok 을 한 번 더 열면 billing 이 갱신된다" }
             return nil
         }
     }
@@ -95,6 +92,7 @@ struct GrokHealth: Equatable {
         case .noData: return "Grok 0/d"
         case .ok: break
         }
+        if let remaining = creditRemainingPercent { return "Grok 남음 \(Int(remaining.rounded()))%" }
         if today.costUsd > 0 { return "Grok \(formatGrokUsd(today.costUsd))/d" }
         if today.totalTokens > 0 { return "Grok \(formatCodexTokens(today.totalTokens))/d" }
         if week.costUsd > 0 { return "Grok \(formatGrokUsd(week.costUsd))/wk" }

@@ -713,10 +713,9 @@ func loadCodexHealth() -> CodexHealth {
             primaryUsedPercent = session
             primaryResetAt = row.sessionResetAt
         }
-        if let weekly = row.weeklyPercent {
-            secondaryUsedPercent = weekly
-            secondaryResetAt = row.weeklyResetAt
-        }
+        // 프록시 주간이 비면 세션 로그 0% 로 채우지 않는다 — 0%는 "한도 충분"으로 오해된다.
+        secondaryUsedPercent = row.weeklyPercent
+        secondaryResetAt = row.weeklyPercent != nil ? row.weeklyResetAt : nil
     }
 
     if max(primaryUsedPercent ?? 0, secondaryUsedPercent ?? 0) >= 90 {

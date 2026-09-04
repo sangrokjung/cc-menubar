@@ -6,7 +6,7 @@ final class CodexStatusView: NSView {
         let accountBlock: CGFloat = health.proxyAccounts.isEmpty ? 0 : 34 + CGFloat(health.proxyAccounts.count) * 24
         let profileRows = max(1, min(2, health.profiles.count))
         let profileBlock: CGFloat = 34 + CGFloat(profileRows) * 24
-        return 12 + 48 + 64 + accountBlock + 8 + profileBlock + 8 + 28 + 22
+        return 12 + 48 + 64 + accountBlock + 8 + profileBlock + 40
     }
 
     var health: CodexHealth? {
@@ -136,8 +136,14 @@ final class CodexStatusView: NSView {
         let statY = topY + 58
         let gap: CGFloat = 9
         let statW = (card.width - 32 - gap * 3) / 4
-        metric("5시간 사용", formatCodexPercent(health.primaryUsedPercent), "리셋 \(formatCodexReset(health.primaryResetAt))", percent: health.primaryUsedPercent, x: innerX, y: statY, width: statW, color: primaryColor)
-        metric("7일 사용", formatCodexPercent(health.secondaryUsedPercent), "리셋 \(formatCodexReset(health.secondaryResetAt))", percent: health.secondaryUsedPercent, x: innerX + (statW + gap), y: statY, width: statW, color: secondaryColor)
+        let remain5h = remainingQuotaPercent(health.primaryUsedPercent)
+        let remain7d = remainingQuotaPercent(health.secondaryUsedPercent)
+        metric("5시간 남음", remain5h.map { formatCodexPercent($0) } ?? "측정 전",
+               remain5h == nil ? "프록시 미측정" : "사용 \(formatCodexPercent(health.primaryUsedPercent)) · 리셋 \(formatCodexReset(health.primaryResetAt))",
+               percent: health.primaryUsedPercent, x: innerX, y: statY, width: statW, color: primaryColor)
+        metric("7일 남음", remain7d.map { formatCodexPercent($0) } ?? "측정 전",
+               remain7d == nil ? "프록시 미측정" : "사용 \(formatCodexPercent(health.secondaryUsedPercent)) · 리셋 \(formatCodexReset(health.secondaryResetAt))",
+               percent: health.secondaryUsedPercent, x: innerX + (statW + gap), y: statY, width: statW, color: secondaryColor)
         metric("오늘 토큰", formatCodexTokens(health.todayTokens), "\(health.todayCalls)회", x: innerX + (statW + gap) * 2, y: statY, width: statW, color: blue)
         let monthlyDetail = codexMonthlyCost > 0 ? formatKRWShort(codexMonthlyCost, rate: usage?.usdKrwRate ?? 1450) : formatCodexTokens(codexMonthlyTokens)
         metric("월 환산비용", codexMonthlyCost > 0 ? formatCost(codexMonthlyCost) : "-", monthlyDetail, x: innerX + (statW + gap) * 3, y: statY, width: statW, color: blue)
@@ -158,7 +164,7 @@ final class CodexStatusView: NSView {
                 let weeklyColor = limitTone(row.weeklyPercent)
                 fillRound(NSRect(x: innerX + 10, y: y + 7, width: 8, height: 8), row.enabled ? sessionColor : muted, 4)
                 drawText(row.name, innerX + 24, y + 2, rowFont, text)
-                drawText(row.sessionPercent.map { formatCodexPercent($0) } ?? "측정 전", innerX + 280, y + 2, rowFont, row.sessionPercent == nil ? dim : sessionColor)
+                drawText(remainingQuotaPercent(row.sessionPercent).map { "남음 \(formatCodexPercent($0))" } ?? "측정 전", innerX + 280, y + 2, rowFont, row.sessionPercent == nil ? dim : sessionColor)
                 if let percent = row.sessionPercent {
                     let track = NSRect(x: innerX + 348, y: y + 8, width: 90, height: 5)
                     fillRound(track, NSColor.white.withAlphaComponent(0.10), 2)
@@ -167,7 +173,7 @@ final class CodexStatusView: NSView {
                         fillRound(NSRect(x: track.minX, y: track.minY, width: max(2, fillWidth), height: track.height), sessionColor, 2)
                     }
                 }
-                drawText(row.weeklyPercent.map { formatCodexPercent($0) } ?? "측정 전", innerX + 520, y + 2, rowFont, row.weeklyPercent == nil ? dim : weeklyColor)
+                drawText(remainingQuotaPercent(row.weeklyPercent).map { "남음 \(formatCodexPercent($0))" } ?? "측정 전", innerX + 520, y + 2, rowFont, row.weeklyPercent == nil ? dim : weeklyColor)
                 if let percent = row.weeklyPercent {
                     let track = NSRect(x: innerX + 580, y: y + 8, width: 90, height: 5)
                     fillRound(track, NSColor.white.withAlphaComponent(0.10), 2)
@@ -214,14 +220,9 @@ final class CodexStatusView: NSView {
             }
         }
 
-        let recY = tableY + 34 + CGFloat(max(rows.count, 1)) * 24 + 8
-        let recText = codexModelRecommendations.map { "\($0.task) \($0.model)" }.joined(separator: "  ·  ")
-        drawText(recText, innerX, recY, smallFont, dim)
-        drawRight("현재 \(modelLabel)\(effort == "-" ? "" : " · \(effort)")", card.maxX - 16, recY, smallFont, blue)
-
         let footerY = card.maxY - 24
-        let hint = health.hints.first ?? "프롬프트: 목표 · 성공 기준 · 권한 · 검증만 명확하게"
-        drawText(hint, innerX, footerY, smallFont, health.hints.isEmpty ? dim : tone)
-        drawRight("tok \(formatCodexTokens(health.totalTokens)) · 7d \(formatCodexReset(health.secondaryResetAt))", card.maxX - 16, footerY, smallFont, dim)
+        let remainText = "5h 남음 \(formatCodexPercent(remain5h)) · 7d 남음 \(remain7d.map(formatCodexPercent) ?? "측정 전")"
+        drawText(remainText, innerX, footerY, smallFont, tone)
+        drawRight("tok \(formatCodexTokens(health.totalTokens))", card.maxX - 16, footerY, smallFont, dim)
     }
 }

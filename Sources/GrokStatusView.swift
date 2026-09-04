@@ -126,19 +126,24 @@ final class GrokStatusView: NSView {
         let gap: CGFloat = 9
         let statW = (card.width - 32 - gap * 3) / 4
 
-        let weekCostDetail = health.week.costUnstampedTurns > 0
-            ? "\(health.week.costUnstampedTurns)턴 미각인"
-            : "\(health.week.modelCalls)회 호출"
-        metric("\(periodLabel) 비용", formatGrokUsd(health.week.costUsd), weekCostDetail,
-               x: innerX, y: statY, width: statW, color: accent)
-
-        let cacheRatio = health.week.totalTokens > 0
-            ? Int(Double(health.week.cachedReadTokens) / Double(health.week.totalTokens) * 100) : 0
-        metric("\(periodLabel) 토큰", formatCodexTokens(health.week.totalTokens), "캐시 \(cacheRatio)%",
-               x: innerX + (statW + gap), y: statY, width: statW, color: accent)
-
+        func limitTone(_ value: Double?) -> NSColor {
+            guard let value = value else { return muted }
+            if value >= 90 { return red }
+            if value >= 70 { return yellow }
+            return green
+        }
+        let usedColor = limitTone(health.creditUsedPercent)
+        if let remaining = health.creditRemainingPercent {
+            metric("주간 남음", formatCodexPercent(remaining), "사용 \(formatCodexPercent(health.creditUsedPercent))",
+                   percent: remaining, x: innerX, y: statY, width: statW, color: usedColor)
+        } else {
+            metric("주간 남음", "측정 전", "billing 미수신",
+                   x: innerX, y: statY, width: statW, color: muted)
+        }
         metric("오늘", formatGrokUsd(health.today.costUsd), "\(formatCodexTokens(health.today.totalTokens)) · \(health.today.turns)턴",
-               x: innerX + (statW + gap) * 2, y: statY, width: statW, color: health.today.turns > 0 ? green : muted)
+               x: innerX + (statW + gap), y: statY, width: statW, color: health.today.turns > 0 ? green : muted)
+        metric("주간 토큰", formatCodexTokens(health.week.totalTokens), "\(formatGrokUsd(health.week.costUsd))",
+               x: innerX + (statW + gap) * 2, y: statY, width: statW, color: accent)
 
         var elapsedPercent: Double?
         if let start = health.periodStart, let end = health.periodEnd, end > start {
@@ -189,8 +194,8 @@ final class GrokStatusView: NSView {
         fillRound(noteRect, panel2, 8)
         strokeRound(noteRect, line.withAlphaComponent(0.8), 8)
         let noteBody = health.quotaAvailable
-            ? "쿼터 있음 — 잔여율 표시 가능"
-            : "쿼터 없음 — xAI 는 한도(분모)를 안 준다. 잔여율 대신 쓴 양만 표시."
+            ? "주간 풀 \(formatCodexPercent(health.creditUsedPercent)) 사용 · 남음 \(formatCodexPercent(health.creditRemainingPercent)) · 일일 한도 없음"
+            : "주간 풀 % 없음 — grok 을 한 번 실행하면 billing 이 갱신된다"
         drawText(noteBody, noteRect.minX + 12, noteRect.minY + 7, smallFont, dim)
 
         let footerY = card.maxY - 30
