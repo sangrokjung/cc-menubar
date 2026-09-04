@@ -3,8 +3,9 @@ import Cocoa
 final class CodexStatusView: NSView {
     static func preferredHeight(for health: CodexHealth?) -> CGFloat {
         guard let health else { return 0 }
+        // draw(): card.minY=4, topY=+14, statY=+58, tableY=+70, rows=34+26n, footer=+10+16, card.maxY=+4
         let accountBlock: CGFloat = health.proxyAccounts.isEmpty ? 0 : 34 + CGFloat(health.proxyAccounts.count) * 26
-        return 12 + 48 + 64 + accountBlock + 28
+        return 4 + 14 + 58 + 70 + accountBlock + 10 + 16 + 4
     }
 
     var health: CodexHealth? {
@@ -184,7 +185,6 @@ final class CodexStatusView: NSView {
             tableY += 34 + CGFloat(health.proxyAccounts.count) * 26
         }
 
-        let footerY = card.maxY - 22
-        drawText("초록 <70%    노랑 70-89%    빨강 >=90%    사용률 바", innerX, footerY, smallFont, muted)
+        drawText("초록 <70%    노랑 70-89%    빨강 >=90%", innerX, tableY + 10, smallFont, muted)
     }
 }
