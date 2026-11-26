@@ -2,6 +2,8 @@
 
 [English](README.md) | [한국어](README.ko.md) | [简体中文](README.zh-CN.md)
 
+> **Moved:** CC Menubar is now developed in [sangrokjung/teamclaude → `menubar/`](https://github.com/sangrokjung/teamclaude/tree/qjc/resilient-routing/menubar). Download the latest build from the [CC Menubar releases](https://github.com/sangrokjung/teamclaude/releases?q=menubar). This repository keeps the original July 2026 version and is no longer updated.
+
 # cc-menubar
 
 **Stop typing `ccusage` every time — it's just there in your menu bar.**

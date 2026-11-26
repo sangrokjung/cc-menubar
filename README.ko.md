@@ -2,6 +2,8 @@
 
 [English](README.md) | [한국어](README.ko.md) | [简体中文](README.zh-CN.md)
 
+> **옮겨 갔습니다:** CC Menubar는 이제 [sangrokjung/teamclaude의 `menubar/` 폴더](https://github.com/sangrokjung/teamclaude/tree/qjc/resilient-routing/menubar)에서 개발합니다. 최신 빌드는 [CC Menubar 릴리스](https://github.com/sangrokjung/teamclaude/releases?q=menubar)에서 받으세요. 이 저장소는 2026년 7월 첫 판을 보관하며 더 이상 갱신하지 않습니다.
+
 # cc-menubar
 
 **터미널에 ccusage 매번 치지 마세요. 메뉴바에 그냥 떠 있습니다.**
