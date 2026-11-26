@@ -2,6 +2,8 @@
 
 [English](README.md) | [한국어](README.ko.md) | [简体中文](README.zh-CN.md)
 
+> **已迁移：** CC Menubar 现在在 [sangrokjung/teamclaude 的 `menubar/` 目录](https://github.com/sangrokjung/teamclaude/tree/qjc/resilient-routing/menubar) 中开发。请从 [CC Menubar 发布页](https://github.com/sangrokjung/teamclaude/releases?q=menubar) 下载最新版本。本仓库保留 2026 年 7 月的初版，不再更新。
+
 # cc-menubar
 
 **不用每次敲 ccusage，菜单栏里随时看得到。**
